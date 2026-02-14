@@ -16,6 +16,7 @@ public class Mediator : IMediator
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly IRequestDispatcher? _dispatcher;
+    private readonly IStreamDispatcher? _streamDispatcher;
     private readonly object? _behaviorPipeline;
 
     /// <summary>
@@ -23,10 +24,12 @@ public class Mediator : IMediator
     /// </summary>
     /// <param name="serviceProvider">The service provider to resolve handlers.</param>
     /// <param name="dispatcher">Optional generated dispatcher for fast invocation.</param>
-    public Mediator(IServiceProvider serviceProvider, IRequestDispatcher? dispatcher = null)
+    /// <param name="streamDispatcher">Optional generated stream dispatcher for fast streaming.</param>
+    public Mediator(IServiceProvider serviceProvider, IRequestDispatcher? dispatcher = null, IStreamDispatcher? streamDispatcher = null)
     {
         _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
         _dispatcher = dispatcher;
+        _streamDispatcher = streamDispatcher;
         
         // Try to get generated behavior pipeline
         var pipelineType = AppDomain.CurrentDomain.GetAssemblies()
@@ -172,7 +175,53 @@ public class Mediator : IMediator
             }
         });
         
+        
         await Task.WhenAll(tasks);
     }
+    
+    public async IAsyncEnumerable<TResponse> CreateStream<TResponse>(
+        IStreamRequest<TResponse> request, 
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        
+        var requestType = request.GetType();
+        var handlerType = typeof(IStreamRequestHandler<,>).MakeGenericType(requestType, typeof(TResponse));
+        
+        var handler = _serviceProvider.GetService(handlerType);
+        
+        if (handler == null)
+        {
+            throw new InvalidOperationException($"No stream handler registered for request type {requestType.FullName}");
+        }
+
+        // Use generated stream dispatcher if available (fast path)
+        if (_streamDispatcher != null)
+        {
+            await foreach (var item in _streamDispatcher.DispatchStream(request, handler, cancellationToken))
+            {
+                yield return item;
+            }
+            yield break;
+        }
+
+        // Fallback to reflection (slow path)
+        var handleMethod = handlerType.GetMethod(nameof(IStreamRequestHandler<IStreamRequest<TResponse>, TResponse>.Handle));
+        var result = handleMethod!.Invoke(handler, [request, cancellationToken]);
+        
+        if (result is IAsyncEnumerable<TResponse> stream)
+        {
+            await foreach (var item in stream.WithCancellation(cancellationToken))
+            {
+                yield return item;
+            }
+        }
+        else
+        {
+            throw new InvalidOperationException($"Handler for {requestType.FullName} did not return an IAsyncEnumerable<{typeof(TResponse).FullName}>");
+        }
+    }
 }
+
+
 

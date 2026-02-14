@@ -18,7 +18,10 @@
   <ItemGroup>
     <!-- Exclude example behaviors with dependencies -->
     <Compile Remove="Behaviors\Examples\**" />
+    <!-- Temporarily exclude behaviors example to run streaming example -->
+    <Compile Remove="Program_Behaviors.cs" />
   </ItemGroup>
+
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>

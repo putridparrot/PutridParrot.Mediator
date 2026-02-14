@@ -49,6 +49,20 @@ public static class ServiceCollectionExtensions
             }
         }
         
+        // Find and register generated stream dispatchers
+        var streamDispatcherTypes = assemblies
+            .SelectMany(a => a.GetTypes())
+            .Where(t => t.Name == "GeneratedStreamDispatcher" && 
+                       t.GetInterfaces().Any(i => i.Name == "IStreamDispatcher"))
+            .ToList();
+        
+        if (streamDispatcherTypes.Count > 0)
+        {
+            // For now, just register the first one found
+            // TODO: Could implement composite pattern for multiple stream dispatchers if needed
+            services.AddSingleton(typeof(IStreamDispatcher), streamDispatcherTypes[0]);
+        }
+        
         services.AddSingleton<IMediator, Mediator>();
         
         if (assemblies.Length > 0)
@@ -61,6 +75,7 @@ public static class ServiceCollectionExtensions
         
         return services;
     }
+
     
     /// <summary>
     /// Scans the specified assemblies and registers all request handlers with the service collection.
@@ -70,16 +85,27 @@ public static class ServiceCollectionExtensions
         var handlerTypes = assemblies
             .SelectMany(a => a.GetTypes())
             .Where(t => t is { IsClass: true, IsAbstract: false } && 
-                       (IsRequestHandler(t) || HasRequestHandlerAttribute(t)));
+                       (IsRequestHandler(t) || IsStreamRequestHandler(t) || HasRequestHandlerAttribute(t)));
         
         foreach (var handlerType in handlerTypes)
         {
-            var interfaces = handlerType.GetInterfaces()
+            // Register IRequestHandler<,> and IRequestHandler<>
+            var requestHandlerInterfaces = handlerType.GetInterfaces()
                 .Where(i => i.IsGenericType && 
                            (i.GetGenericTypeDefinition() == typeof(IRequestHandler<,>) ||
                             i.GetGenericTypeDefinition() == typeof(IRequestHandler<>)));
             
-            foreach (var @interface in interfaces)
+            foreach (var @interface in requestHandlerInterfaces)
+            {
+                services.AddTransient(@interface, handlerType);
+            }
+            
+            // Register IStreamRequestHandler<,>
+            var streamHandlerInterfaces = handlerType.GetInterfaces()
+                .Where(i => i.IsGenericType && 
+                           i.GetGenericTypeDefinition() == typeof(IStreamRequestHandler<,>));
+            
+            foreach (var @interface in streamHandlerInterfaces)
             {
                 services.AddTransient(@interface, handlerType);
             }
@@ -87,6 +113,7 @@ public static class ServiceCollectionExtensions
         
         return services;
     }
+
     
     private static bool IsRequestHandler(Type type)
     {
@@ -96,9 +123,17 @@ public static class ServiceCollectionExtensions
              i.GetGenericTypeDefinition() == typeof(IRequestHandler<>)));
     }
     
+    private static bool IsStreamRequestHandler(Type type)
+    {
+        return type.GetInterfaces().Any(i => 
+            i.IsGenericType && 
+            i.GetGenericTypeDefinition() == typeof(IStreamRequestHandler<,>));
+    }
+    
     private static bool HasRequestHandlerAttribute(Type type)
     {
         return type.GetCustomAttribute<RequestHandlerAttribute>() != null;
     }
 }
+
 
