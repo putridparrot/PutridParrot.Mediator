@@ -15,6 +15,4 @@ namespace PutridParrot.Mediator;
 /// public record OrderCreatedNotification(int OrderId, decimal Amount) : INotification;
 /// </code>
 /// </example>
-public interface INotification
-{
-}
+public interface INotification;

@@ -10,6 +10,14 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.0" />
+  </ItemGroup>
+
+  
+  <ItemGroup>
+    <!-- Exclude example behaviors with dependencies -->
+    <Compile Remove="Behaviors\Examples\**" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -23,4 +31,5 @@
   </PropertyGroup>
 
 </Project>
+
 

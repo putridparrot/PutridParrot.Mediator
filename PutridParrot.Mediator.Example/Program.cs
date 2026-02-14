@@ -1,9 +1,29 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using PutridParrot.Mediator;
+using PutridParrot.Mediator.Example.Behaviors;
+
+Console.WriteLine("╔════════════════════════════════════════════╗");
+Console.WriteLine("║  PutridParrot.Mediator - Demo Program      ║");
+Console.WriteLine("╚════════════════════════════════════════════╝\n");
 
 // Setup
 var services = new ServiceCollection();
+
+// Add logging
+services.AddLogging(builder =>
+{
+    builder.AddConsole();
+    builder.SetMinimumLevel(LogLevel.Debug); // Set to Debug to see LoggingPipelineBehavior output
+});
+
+
+// Add mediator
 services.AddMediator(typeof(Program).Assembly);
+
+// Manually register pipeline behaviors (they need explicit registration)
+services.AddTransient(typeof(IPipelineBehavior<,>), typeof(TimingBehavior<,>));
+services.AddTransient(typeof(IPipelineBehavior<,>), typeof(LoggingPipelineBehavior<,>));
 
 var serviceProvider = services.BuildServiceProvider();
 var mediator = serviceProvider.GetRequiredService<IMediator>();
@@ -12,20 +32,25 @@ var mediator = serviceProvider.GetRequiredService<IMediator>();
 Console.WriteLine("=== Example 1: Request with Response ===");
 var getUserRequest = new GetUserByIdRequest(1);
 var user = await mediator.Send(getUserRequest);
-Console.WriteLine($"User: {user.Id} - {user.Name}");
+Console.WriteLine($"✓ User: {user.Id} - {user.Name}\n");
 
 // Example 2: Request without Response (Command)
-Console.WriteLine("\n=== Example 2: Command (no response) ===");
+Console.WriteLine("=== Example 2: Command (no response) ===");
 var createUserRequest = new CreateUserCommand("John Doe", "john@example.com");
 await mediator.Send(createUserRequest);
+Console.WriteLine();
 
 // Example 3: Another query
-Console.WriteLine("\n=== Example 3: Calculate Sum ===");
+Console.WriteLine("=== Example 3: Calculate Sum ===");
 var calculateRequest = new CalculateSumRequest(5, 10);
 var sum = await mediator.Send(calculateRequest);
-Console.WriteLine($"Sum: {sum}");
+Console.WriteLine($"✓ Sum: {sum}\n");
 
-Console.WriteLine("\nDone!");
+Console.WriteLine("✅ All examples completed!");
+Console.WriteLine("\n🎉 Pipeline behaviors are working!");
+Console.WriteLine("   - TimingBehavior: Measures execution time");
+Console.WriteLine("   - LoggingPipelineBehavior: Logs request/response\n");
+
 
 // ===== Requests =====
 

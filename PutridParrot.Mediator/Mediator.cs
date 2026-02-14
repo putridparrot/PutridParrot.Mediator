@@ -3,7 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace PutridParrot.Mediator;
 
 /// <summary>
-/// Fast mediator implementation that uses source-generated dispatcher for optimal performance.
+/// Mediator implementation that uses source-generated dispatcher for optimal performance.
 /// Falls back to reflection-based dispatch if generated dispatcher is not available.
 /// </summary>
 /// <remarks>
@@ -16,6 +16,7 @@ public class Mediator : IMediator
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly IRequestDispatcher? _dispatcher;
+    private readonly object? _behaviorPipeline;
 
     /// <summary>
     /// Initializes a new instance of the FastMediator class.
@@ -26,8 +27,21 @@ public class Mediator : IMediator
     {
         _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
         _dispatcher = dispatcher;
+        
+        // Try to get generated behavior pipeline
+        var pipelineType = AppDomain.CurrentDomain.GetAssemblies()
+            .SelectMany(a => a.GetTypes())
+            .FirstOrDefault(t => t.Name == "GeneratedBehaviorPipeline" && t.Namespace == "PutridParrot.Mediator");
+        
+        if (pipelineType != null)
+        {
+            _behaviorPipeline = Activator.CreateInstance(pipelineType, serviceProvider);
+        }
     }
 
+    /// <summary>
+    /// Sends a request to its handler, executing any registered pipeline behaviors.
+    /// </summary>
     public async Task<TResponse> Send<TResponse>(IRequest<TResponse> request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -42,24 +56,53 @@ public class Mediator : IMediator
             throw new InvalidOperationException($"No handler registered for request type {requestType.FullName}");
         }
 
-        // Use generated dispatcher if available (fast path)
-        if (_dispatcher != null)
+        // Define the handler delegate
+        Func<Task<TResponse>> handlerDelegate = async () =>
         {
-            return await _dispatcher.Dispatch(request, handler, cancellationToken);
+            // Use generated dispatcher if available (fast path)
+            if (_dispatcher != null)
+            {
+                return await _dispatcher.Dispatch(request, handler, cancellationToken);
+            }
+
+            // Fallback to reflection (slow path)
+            var handleMethod = handlerType.GetMethod(nameof(IRequestHandler<,>.Handle));
+            var result = handleMethod!.Invoke(handler, [request, cancellationToken]);
+            
+            if (result is Task<TResponse> task)
+            {
+                return await task;
+            }
+            
+            throw new InvalidOperationException($"Handler for {requestType.FullName} did not return a Task<{typeof(TResponse).FullName}>");
+        };
+
+        // Use generated behavior pipeline if available
+        if (_behaviorPipeline != null)
+        {
+            var pipelineMethod = _behaviorPipeline.GetType().GetMethod("ExecuteWithBehaviors");
+            if (pipelineMethod != null)
+            {
+                var genericMethod = pipelineMethod.MakeGenericMethod(requestType, typeof(TResponse));
+                var pipelineResult = genericMethod.Invoke(_behaviorPipeline, [request, handlerDelegate, cancellationToken]);
+                
+                if (pipelineResult is Task<TResponse> pipelineTask)
+                {
+                    return await pipelineTask;
+                }
+            }
         }
 
-        // Fallback to reflection (slow path)
-        var handleMethod = handlerType.GetMethod(nameof(IRequestHandler<IRequest<TResponse>, TResponse>.Handle));
-        var result = handleMethod!.Invoke(handler, [request, cancellationToken]);
-        
-        if (result is Task<TResponse> task)
-        {
-            return await task;
-        }
-        
-        throw new InvalidOperationException($"Handler for {requestType.FullName} did not return a Task<{typeof(TResponse).FullName}>");
+        // No behaviors, execute handler directly
+        return await handlerDelegate();
     }
     
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="cancellationToken"></param>
+    /// <exception cref="InvalidOperationException"></exception>
     public async Task Send(IRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -82,7 +125,7 @@ public class Mediator : IMediator
         }
 
         // Fallback to reflection (slow path)
-        var handleMethod = handlerType.GetMethod(nameof(IRequestHandler<IRequest>.Handle));
+        var handleMethod = handlerType.GetMethod(nameof(IRequestHandler<>.Handle));
         var result = handleMethod!.Invoke(handler, [request, cancellationToken]);
         
         if (result is Task task)
@@ -95,6 +138,11 @@ public class Mediator : IMediator
         throw new InvalidOperationException($"Handler for {requestType.FullName} did not return a Task");
     }
     
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="notification"></param>
+    /// <param name="cancellationToken"></param>
     public async Task Publish(INotification notification, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(notification);
@@ -108,7 +156,7 @@ public class Mediator : IMediator
         {
             try
             {
-                var handleMethod = handlerType.GetMethod(nameof(INotificationHandler<INotification>.Handle));
+                var handleMethod = handlerType.GetMethod(nameof(INotificationHandler<>.Handle));
                 var result = handleMethod!.Invoke(handler, [notification, cancellationToken]);
                 
                 if (result is Task task)

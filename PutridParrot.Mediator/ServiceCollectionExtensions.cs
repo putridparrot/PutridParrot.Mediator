@@ -20,11 +20,6 @@ public static class ServiceCollectionExtensions
     /// for optimal performance. It also registers the <see cref="IRequestDispatcher"/> if available.
     /// All discovered handlers are registered as transient services.
     /// </remarks>
-    /// <example>
-    /// <code>
-    /// services.AddMediator(typeof(MyHandler).Assembly);
-    /// </code>
-    /// </example>
     public static IServiceCollection AddMediator(this IServiceCollection services, params Assembly[] assemblies)
     {
         // Find all generated dispatchers across assemblies
@@ -59,6 +54,9 @@ public static class ServiceCollectionExtensions
         if (assemblies.Length > 0)
         {
             services.AddRequestHandlers(assemblies);
+            // Note: Pipeline behaviors are discovered by source generator but must be
+            // manually registered by users due to dependency requirements.
+            // Example: services.AddTransient<IPipelineBehavior<MyRequest, MyResponse>, MyBehavior>();
         }
         
         return services;
@@ -67,19 +65,6 @@ public static class ServiceCollectionExtensions
     /// <summary>
     /// Scans the specified assemblies and registers all request handlers with the service collection.
     /// </summary>
-    /// <param name="services">The service collection to add handlers to.</param>
-    /// <param name="assemblies">The assemblies to scan for request handlers.</param>
-    /// <returns>The service collection for chaining.</returns>
-    /// <remarks>
-    /// This method discovers all non-abstract classes that implement <see cref="IRequestHandler{TRequest}"/>
-    /// or <see cref="IRequestHandler{TRequest, TResponse}"/> or are marked with <see cref="RequestHandlerAttribute"/>.
-    /// All discovered handlers are registered as transient services.
-    /// </remarks>
-    /// <example>
-    /// <code>
-    /// services.AddRequestHandlers(Assembly.GetExecutingAssembly());
-    /// </code>
-    /// </example>
     public static IServiceCollection AddRequestHandlers(this IServiceCollection services, params Assembly[] assemblies)
     {
         var handlerTypes = assemblies
@@ -116,3 +101,4 @@ public static class ServiceCollectionExtensions
         return type.GetCustomAttribute<RequestHandlerAttribute>() != null;
     }
 }
+

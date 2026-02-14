@@ -4,22 +4,26 @@ namespace PutridParrot.Mediator;
 /// Composite dispatcher that delegates to multiple generated dispatchers.
 /// Useful when handlers are spread across multiple assemblies, each with their own generated dispatcher.
 /// </summary>
-public sealed class CompositeRequestDispatcher : IRequestDispatcher
+public sealed class CompositeRequestDispatcher(IEnumerable<IRequestDispatcher> dispatchers) : IRequestDispatcher
 {
-    private readonly IReadOnlyList<IRequestDispatcher> _dispatchers;
+    private readonly IReadOnlyList<IRequestDispatcher> _dispatchers = dispatchers.ToList();
 
-    public CompositeRequestDispatcher(IEnumerable<IRequestDispatcher> dispatchers)
-    {
-        _dispatchers = dispatchers.ToList();
-    }
-
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="handler"></param>
+    /// <param name="cancellationToken"></param>
+    /// <typeparam name="TResponse"></typeparam>
+    /// <returns></returns>
+    /// <exception cref="InvalidOperationException"></exception>
     public async Task<TResponse> Dispatch<TResponse>(
         IRequest<TResponse> request, 
         object handler, 
         CancellationToken cancellationToken)
     {
         var exceptions = new List<Exception>();
-        
+
         foreach (var dispatcher in _dispatchers)
         {
             try
@@ -30,7 +34,6 @@ public sealed class CompositeRequestDispatcher : IRequestDispatcher
             {
                 // This dispatcher doesn't know about this request type, try next
                 exceptions.Add(ex);
-                continue;
             }
         }
         
@@ -39,6 +42,13 @@ public sealed class CompositeRequestDispatcher : IRequestDispatcher
             $"Tried {_dispatchers.Count} dispatcher(s).");
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="request"></param>
+    /// <param name="handler"></param>
+    /// <param name="cancellationToken"></param>
+    /// <exception cref="InvalidOperationException"></exception>
     public async Task Dispatch(
         IRequest request, 
         object handler, 
@@ -57,7 +67,6 @@ public sealed class CompositeRequestDispatcher : IRequestDispatcher
             {
                 // This dispatcher doesn't know about this request type, try next
                 exceptions.Add(ex);
-                continue;
             }
         }
         
