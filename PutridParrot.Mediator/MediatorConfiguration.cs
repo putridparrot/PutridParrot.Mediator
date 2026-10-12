@@ -79,31 +79,45 @@ public sealed class MediatorConfiguration
     }
 
     /// <summary>
-    /// Adds an open generic pipeline behavior that applies to every request,
-    /// for example <c>typeof(CachingBehavior&lt;,&gt;)</c>.
+    /// Adds an open generic behavior that applies to every request, for example <c>typeof(CachingBehavior&lt;,&gt;)</c>,
+    /// or to every streaming request when it implements <see cref="IStreamPipelineBehavior{TRequest,TResponse}"/>.
+    /// A type implementing both interfaces is registered for both.
     /// </summary>
-    /// <param name="openBehaviorType">An open generic type implementing <see cref="IPipelineBehavior{TRequest,TResponse}"/>.</param>
+    /// <param name="openBehaviorType">
+    /// An open generic type implementing <see cref="IPipelineBehavior{TRequest,TResponse}"/>
+    /// and/or <see cref="IStreamPipelineBehavior{TRequest,TResponse}"/>.
+    /// </param>
     /// <exception cref="ArgumentException">The type is not an open generic pipeline behavior.</exception>
     public MediatorConfiguration AddOpenBehavior(
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.Interfaces)] Type openBehaviorType)
     {
         ArgumentNullException.ThrowIfNull(openBehaviorType);
 
-        if (!openBehaviorType.IsGenericTypeDefinition ||
-            !openBehaviorType.GetInterfaces().Any(IsPipelineBehaviorInterface))
+        var pipelines = openBehaviorType.IsGenericTypeDefinition
+            ? openBehaviorType.GetInterfaces()
+                .Where(IsBehaviorInterface)
+                .Select(i => i.GetGenericTypeDefinition())
+                .Distinct()
+                .ToList()
+            : [];
+
+        if (pipelines.Count == 0)
         {
             throw new ArgumentException(
-                $"{openBehaviorType.FullName} must be an open generic type implementing IPipelineBehavior<,>, e.g. typeof(MyBehavior<,>).",
+                $"{openBehaviorType.FullName} must be an open generic type implementing IPipelineBehavior<,> or IStreamPipelineBehavior<,>, e.g. typeof(MyBehavior<,>).",
                 nameof(openBehaviorType));
         }
 
-        _behaviors.Add(new ServiceDescriptor(typeof(IPipelineBehavior<,>), openBehaviorType, BehaviorLifetime));
+        foreach (var pipeline in pipelines)
+        {
+            _behaviors.Add(new ServiceDescriptor(pipeline, openBehaviorType, BehaviorLifetime));
+        }
         return this;
     }
 
     /// <summary>
-    /// Adds a closed pipeline behavior, registered for each <see cref="IPipelineBehavior{TRequest,TResponse}"/>
-    /// it implements, so it only applies to those request types.
+    /// Adds a closed behavior, registered for each <see cref="IPipelineBehavior{TRequest,TResponse}"/> and
+    /// <see cref="IStreamPipelineBehavior{TRequest,TResponse}"/> it implements, so it only applies to those request types.
     /// </summary>
     /// <typeparam name="TBehavior">A non-generic behavior class.</typeparam>
     /// <exception cref="ArgumentException">The type does not implement a closed pipeline behavior.</exception>
@@ -111,12 +125,12 @@ public sealed class MediatorConfiguration
         where TBehavior : class
     {
         var behaviorType = typeof(TBehavior);
-        var interfaces = behaviorType.GetInterfaces().Where(IsPipelineBehaviorInterface).ToList();
+        var interfaces = behaviorType.GetInterfaces().Where(IsBehaviorInterface).ToList();
 
         if (behaviorType.IsGenericTypeDefinition || interfaces.Count == 0)
         {
             throw new ArgumentException(
-                $"{behaviorType.FullName} must implement IPipelineBehavior<TRequest, TResponse> for a specific request type. Use AddOpenBehavior for open generic behaviors.",
+                $"{behaviorType.FullName} must implement IPipelineBehavior<TRequest, TResponse> or IStreamPipelineBehavior<TRequest, TResponse> for a specific request type. Use AddOpenBehavior for open generic behaviors.",
                 nameof(TBehavior));
         }
 
@@ -127,6 +141,8 @@ public sealed class MediatorConfiguration
         return this;
     }
 
-    private static bool IsPipelineBehaviorInterface(Type type) =>
-        type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IPipelineBehavior<,>);
+    private static bool IsBehaviorInterface(Type type) =>
+        type.IsGenericType &&
+        (type.GetGenericTypeDefinition() == typeof(IPipelineBehavior<,>) ||
+         type.GetGenericTypeDefinition() == typeof(IStreamPipelineBehavior<,>));
 }

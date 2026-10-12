@@ -13,14 +13,19 @@ services.AddMediator(cfg =>
 {
     cfg.AddOpenBehavior(typeof(ExceptionHandlingBehavior<,>));
     cfg.AddOpenBehavior(typeof(ValidationBehavior<,>));
+    cfg.AddOpenBehavior(typeof(ValidationStreamBehavior<,>));
 });
 services.AddGeneratedMediatorHandlers();
 Unroutable.Register(services);
 
-// Without open generic behaviors, value-type responses work under Native AOT too
+// Without open generic behaviors, value-type responses and stream items work under Native AOT too
 var closedOnlyServices = new ServiceCollection();
 closedOnlyServices.AddSingleton<Log>();
-closedOnlyServices.AddMediator(cfg => cfg.AddBehavior<TimingBehavior>());
+closedOnlyServices.AddMediator(cfg =>
+{
+    cfg.AddBehavior<TimingBehavior>();
+    cfg.AddBehavior<DoubleBehavior>();
+});
 closedOnlyServices.AddGeneratedMediatorHandlers();
 await using var closedOnlyProvider = closedOnlyServices.BuildServiceProvider();
 
@@ -66,13 +71,38 @@ await Check("value-type response with open behaviors", async () =>
     }
 }, RuntimeFeature.IsDynamicCodeSupported ? "5" : "clear AOT error");
 await Check("command", async () => { await mediator.Send(new Remember("x")); return log.Read(); }, "remembered x");
-await Check("stream", async () =>
+async Task<string> Stream<T>(IMediator target, IStreamRequest<T> request)
 {
-    var items = new List<int>();
-    await foreach (var item in mediator.CreateStream(new CountTo(3)))
-        items.Add(item);
+    var items = new List<string>();
+    await foreach (var item in target.CreateStream(request))
+        items.Add($"{item}");
     return string.Join(",", items);
-}, "0,1,2");
+}
+
+await Check("stream with open validation behavior", () => Stream(mediator, new Words("a b c")), "a,b,c");
+await Check("stream validation failure", async () =>
+{
+    try
+    {
+        return await Stream(mediator, new Words(""));
+    }
+    catch (RequestValidationException)
+    {
+        return "rejected";
+    }
+}, "rejected");
+await Check("value-type stream with closed behavior", () => Stream(closedOnlyProvider.GetRequiredService<IMediator>(), new CountTo(3)), "0,2,4");
+await Check("value-type stream with open behaviors", async () =>
+{
+    try
+    {
+        return await Stream(mediator, new CountTo(3));
+    }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("can't be created under Native AOT"))
+    {
+        return "clear AOT error";
+    }
+}, RuntimeFeature.IsDynamicCodeSupported ? "0,1,2" : "clear AOT error");
 await Check("notification", async () => { await mediator.Publish(new Announced("hi")); return log.Read(); }, "first hi,second hi");
 await Check("ISender", () => provider.GetRequiredService<ISender>().Send(new Greet("sender")), "Hello sender");
 
@@ -172,6 +202,38 @@ namespace PutridParrot.Mediator.AotSmokeTest
                 yield return i;
             }
         }
+    }
+
+    /// <summary>A closed stream behavior, for a stream of a value type.</summary>
+    public class DoubleBehavior : IStreamPipelineBehavior<CountTo, int>
+    {
+        public async IAsyncEnumerable<int> Handle(CountTo request, StreamHandlerDelegate<int> next, [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            await foreach (var item in next().WithCancellation(cancellationToken))
+                yield return item * 2;
+        }
+    }
+
+    public record Words(string Text) : IStreamRequest<string>;
+
+    public class WordsHandler : IStreamRequestHandler<Words, string>
+    {
+        public async IAsyncEnumerable<string> Handle(Words request, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            foreach (var word in request.Text.Split(' '))
+            {
+                await Task.Yield();
+                yield return word;
+            }
+        }
+    }
+
+    public class WordsValidator : IRequestValidator<Words>
+    {
+        public Task<IReadOnlyList<ValidationFailure>> ValidateAsync(Words request, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<ValidationFailure>>(string.IsNullOrEmpty(request.Text)
+                ? [new ValidationFailure(nameof(request.Text), "Text is required")]
+                : []);
     }
 
     public record Announced(string Text) : INotification;

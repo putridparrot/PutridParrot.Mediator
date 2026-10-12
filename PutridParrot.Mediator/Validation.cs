@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace PutridParrot.Mediator;
 
 /// <summary>
@@ -104,9 +106,75 @@ public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TReques
     /// <exception cref="RequestValidationException">One or more validators reported a failure.</exception>
     public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken)
     {
+        await RequestValidation.ValidateAsync(_validators, request, cancellationToken);
+        return await next();
+    }
+}
+
+/// <summary>
+/// Stream pipeline behavior that runs every registered <see cref="IRequestValidator{TRequest}"/> before the
+/// stream starts, throwing <see cref="RequestValidationException"/> with all failures if any validator reports one.
+/// </summary>
+/// <typeparam name="TRequest">The type of streaming request.</typeparam>
+/// <typeparam name="TResponse">The type of each item in the stream.</typeparam>
+/// <remarks>
+/// Like the stream itself, validation runs when enumeration starts, so the exception is thrown by the
+/// first <c>MoveNextAsync</c> (the first iteration of <c>await foreach</c>).
+/// </remarks>
+/// <example>
+/// <code>
+/// services.AddMediator(cfg =>
+/// {
+///     cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
+///     cfg.AddOpenBehavior(typeof(ValidationStreamBehavior&lt;,&gt;));
+/// });
+/// </code>
+/// </example>
+public class ValidationStreamBehavior<TRequest, TResponse> : IStreamPipelineBehavior<TRequest, TResponse>
+    where TRequest : notnull
+{
+    private readonly IEnumerable<IRequestValidator<TRequest>> _validators;
+
+    /// <summary>
+    /// Initializes a new instance of the ValidationStreamBehavior class.
+    /// </summary>
+    /// <param name="validators">The validators registered for the request type.</param>
+    public ValidationStreamBehavior(IEnumerable<IRequestValidator<TRequest>> validators)
+    {
+        _validators = validators ?? throw new ArgumentNullException(nameof(validators));
+    }
+
+    /// <summary>
+    /// Validates the request, then streams the items of the next behavior or handler if it is valid.
+    /// </summary>
+    /// <exception cref="RequestValidationException">One or more validators reported a failure.</exception>
+    public async IAsyncEnumerable<TResponse> Handle(
+        TRequest request,
+        StreamHandlerDelegate<TResponse> next,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await RequestValidation.ValidateAsync(_validators, request, cancellationToken);
+
+        await foreach (var item in next().WithCancellation(cancellationToken))
+        {
+            yield return item;
+        }
+    }
+}
+
+internal static class RequestValidation
+{
+    /// <summary>
+    /// Runs every validator and throws <see cref="RequestValidationException"/> with all failures, if any.
+    /// </summary>
+    public static async Task ValidateAsync<TRequest>(
+        IEnumerable<IRequestValidator<TRequest>> validators,
+        TRequest request,
+        CancellationToken cancellationToken)
+    {
         List<ValidationFailure>? failures = null;
 
-        foreach (var validator in _validators)
+        foreach (var validator in validators)
         {
             var result = await validator.ValidateAsync(request, cancellationToken);
             if (result.Count > 0)
@@ -119,7 +187,5 @@ public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TReques
         {
             throw new RequestValidationException(typeof(TRequest), failures);
         }
-
-        return await next();
     }
 }

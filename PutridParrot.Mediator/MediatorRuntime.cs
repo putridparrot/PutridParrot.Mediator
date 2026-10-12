@@ -83,7 +83,8 @@ public static class MediatorRuntime
     }
 
     /// <summary>
-    /// Resolves the stream handler for <typeparamref name="TRequest"/> and returns its stream.
+    /// Resolves the stream handler for <typeparamref name="TRequest"/> and returns its stream, wrapped by
+    /// any registered stream pipeline behaviors.
     /// </summary>
     /// <exception cref="InvalidOperationException">No stream handler is registered for the request type.</exception>
     public static IAsyncEnumerable<TResponse> CreateStream<TRequest, TResponse>(MediatorContext context, TRequest request, CancellationToken cancellationToken)
@@ -92,7 +93,24 @@ public static class MediatorRuntime
         var handler = context.ServiceProvider.GetService<IStreamRequestHandler<TRequest, TResponse>>()
             ?? throw new InvalidOperationException($"No stream handler registered for request type {typeof(TRequest).FullName}");
 
-        return handler.Handle(request, cancellationToken);
+        var behaviors = ResolveBehaviors<IStreamPipelineBehavior<TRequest, TResponse>, TRequest, TResponse>(context.ServiceProvider);
+
+        if (behaviors.Length == 0)
+        {
+            return handler.Handle(request, cancellationToken);
+        }
+
+        // Build the pipeline from the inside out so the first registered behavior is the outermost
+        StreamHandlerDelegate<TResponse> pipeline = () => handler.Handle(request, cancellationToken);
+
+        for (var i = behaviors.Length - 1; i >= 0; i--)
+        {
+            var behavior = behaviors[i];
+            var next = pipeline;
+            pipeline = () => behavior.Handle(request, next, cancellationToken);
+        }
+
+        return pipeline();
     }
 
     /// <summary>
@@ -147,20 +165,7 @@ public static class MediatorRuntime
         CancellationToken cancellationToken)
         where TRequest : notnull
     {
-        IPipelineBehavior<TRequest, TResponse>[] behaviors;
-        try
-        {
-            behaviors = serviceProvider.GetServices<IPipelineBehavior<TRequest, TResponse>>().ToArray();
-        }
-        catch (InvalidOperationException ex) when (!RuntimeFeature.IsDynamicCodeSupported && typeof(TResponse).IsValueType)
-        {
-            // The DI container can't close open generic services over value types without dynamic code
-            throw new InvalidOperationException(
-                $"Pipeline behaviors for {typeof(TRequest).Name} can't be created under Native AOT: its response type " +
-                $"{typeof(TResponse).Name} is a value type and open generic behaviors (AddOpenBehavior) are registered. " +
-                "Return a reference type (for example a record) from the request, or register behaviors for it as " +
-                "closed types with AddBehavior<T>() instead of open generics.", ex);
-        }
+        var behaviors = ResolveBehaviors<IPipelineBehavior<TRequest, TResponse>, TRequest, TResponse>(serviceProvider);
 
         if (behaviors.Length == 0)
         {
@@ -178,6 +183,24 @@ public static class MediatorRuntime
         }
 
         return pipeline();
+    }
+
+    private static TBehavior[] ResolveBehaviors<TBehavior, TRequest, TResponse>(IServiceProvider serviceProvider)
+        where TBehavior : notnull
+    {
+        try
+        {
+            return serviceProvider.GetServices<TBehavior>().ToArray();
+        }
+        catch (InvalidOperationException ex) when (!RuntimeFeature.IsDynamicCodeSupported && typeof(TResponse).IsValueType)
+        {
+            // The DI container can't close open generic services over value types without dynamic code
+            throw new InvalidOperationException(
+                $"Pipeline behaviors for {typeof(TRequest).Name} can't be created under Native AOT: its response type " +
+                $"{typeof(TResponse).Name} is a value type and open generic behaviors (AddOpenBehavior) are registered. " +
+                "Return a reference type (for example a record) from the request, or register behaviors for it as " +
+                "closed types with AddBehavior<T>() instead of open generics.", ex);
+        }
     }
 
     private static InvalidOperationException NoHandler(Type requestType) =>

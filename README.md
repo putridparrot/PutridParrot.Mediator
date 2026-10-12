@@ -8,7 +8,7 @@ A lightweight implementation of the Mediator pattern for .NET, with optional sou
 - Requests with and without responses, notifications and streaming requests
 - Built-in dependency injection integration
 - Source generator for reflection-free routing and registration, compatible with trimming and Native AOT
-- Pipeline behaviors for cross-cutting concerns, including built-in logging, caching, validation and exception handling
+- Pipeline behaviors for requests and streams, including built-in logging, caching, validation and exception handling
 - Async/await support with CancellationToken
 - Minimal dependencies
 - Targets .NET 8 and .NET 10
@@ -237,6 +237,54 @@ services.AddMediator(cfg =>
 });
 ```
 
+### Stream behaviors
+
+Streaming requests have their own pipeline. An `IStreamPipelineBehavior<TRequest, TResponse>` wraps the
+stream returned by the next behavior or the handler, so it can act before enumeration starts, on each item
+(observing, transforming or filtering it), and when the stream completes or fails. Register stream behaviors
+with the same `AddOpenBehavior` / `AddBehavior<T>()` calls; they run in the order added. Request behaviors
+don't run for streams and stream behaviors don't run for requests; a class implementing both interfaces is
+registered for both.
+
+```csharp
+public class CountingStreamBehavior<TRequest, TResponse> : IStreamPipelineBehavior<TRequest, TResponse>
+    where TRequest : notnull
+{
+    public async IAsyncEnumerable<TResponse> Handle(
+        TRequest request,
+        StreamHandlerDelegate<TResponse> next,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var count = 0;
+        await foreach (var item in next().WithCancellation(cancellationToken))
+        {
+            count++;
+            yield return item;
+        }
+        Console.WriteLine($"{typeof(TRequest).Name} streamed {count} items");
+    }
+}
+
+services.AddMediator(cfg =>
+{
+    cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
+    cfg.AddOpenBehavior(typeof(LoggingStreamBehavior<,>));
+    cfg.AddOpenBehavior(typeof(ValidationStreamBehavior<,>));
+    cfg.AddOpenBehavior(typeof(CountingStreamBehavior<,>));
+});
+```
+
+Built-in stream behaviors:
+
+- **`LoggingStreamBehavior<,>`** logs when the stream starts, the number of items and elapsed time when it
+  completes, and any failure at Error level.
+- **`ValidationStreamBehavior<,>`** runs the same `IRequestValidator<TRequest>` validators as requests, before
+  the handler starts. Like the stream itself, this happens when enumeration begins, so the
+  `RequestValidationException` is thrown by the first iteration of `await foreach`.
+
+There is no stream version of exception handling: once a stream has produced items, it can't be replaced
+by a single recovery response.
+
 ## Notifications
 
 Notifications are published to every registered `INotificationHandler<T>`, one at a time in registration
@@ -345,9 +393,10 @@ The library is marked AOT-compatible. For a fully reflection-free app:
 - Register with `AddMediator()` + `AddGeneratedMediatorHandlers()` rather than assembly scanning
 - Keep handlers in projects that reference the package, and not private, so they get generated routes
 - Open generic behaviors (`AddOpenBehavior`) can't be used with **value-type responses** (such as
-  `IRequest<int>`): the DI container can't create open generic services over value types without dynamic
-  code. Return a reference type (for example a record) or register closed behaviors with `AddBehavior<T>()`.
-  The mediator throws a clear exception if this happens. Commands are unaffected.
+  `IRequest<int>`) or, for stream behaviors, value-type items (such as `IStreamRequest<int>`): the DI
+  container can't create open generic services over value types without dynamic code. Return a reference
+  type (for example a record) or register closed behaviors with `AddBehavior<T>()`. The mediator throws a
+  clear exception if this happens. Commands are unaffected.
 
 The `PutridParrot.Mediator.AotSmokeTest` project is published as a Native AOT executable in CI to verify this.
 
