@@ -1,5 +1,7 @@
-using Microsoft.Extensions.DependencyInjection;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace PutridParrot.Mediator;
 
@@ -8,17 +10,35 @@ namespace PutridParrot.Mediator;
 /// </summary>
 public static class ServiceCollectionExtensions
 {
+    internal const string ScanningMessage =
+        "Assembly scanning uses reflection to find handlers, which may be removed by trimming. " +
+        "For trimmed or Native AOT apps call AddGeneratedMediatorHandlers() (generated in each project) instead.";
+
     /// <summary>
-    /// Registers the mediator and optionally scans assemblies for handlers, validators and exception handlers.
+    /// Registers the mediator without scanning for handlers.
     /// </summary>
     /// <param name="services">The service collection to add services to.</param>
-    /// <param name="assemblies">Optional assemblies to scan for handlers. If none provided, only the mediator is registered.</param>
     /// <returns>The service collection for chaining.</returns>
     /// <remarks>
-    /// This method registers <see cref="Mediator"/> as a transient service, along with any source-generated
-    /// dispatchers found in the assemblies for optimal performance.
-    /// All discovered handlers are registered as transient services.
+    /// Combine with the generated <c>AddGeneratedMediatorHandlers()</c> of each project for a reflection-free,
+    /// trimming and Native AOT compatible setup.
     /// </remarks>
+    public static IServiceCollection AddMediator(this IServiceCollection services)
+    {
+        return services.AddMediator(_ => { });
+    }
+
+    /// <summary>
+    /// Registers the mediator and scans assemblies for handlers, validators and exception handlers.
+    /// </summary>
+    /// <param name="services">The service collection to add services to.</param>
+    /// <param name="assemblies">Assemblies to scan for handlers.</param>
+    /// <returns>The service collection for chaining.</returns>
+    /// <remarks>
+    /// This method registers <see cref="Mediator"/> as a transient service, along with the source-generated
+    /// routes found in the assemblies. All discovered handlers are registered as transient services.
+    /// </remarks>
+    [RequiresUnreferencedCode(ScanningMessage)]
     public static IServiceCollection AddMediator(this IServiceCollection services, params Assembly[] assemblies)
     {
         return services.AddMediator(cfg => cfg.RegisterServicesFromAssemblies(assemblies));
@@ -51,30 +71,6 @@ public static class ServiceCollectionExtensions
 
         var configuration = new MediatorConfiguration();
         configure(configuration);
-        var assemblies = configuration.Assemblies.ToArray();
-
-        // Register the generated dispatchers; one per assembly that uses the source generator
-        var requestDispatchers = FindGeneratedTypes<IRequestDispatcher>(assemblies, "GeneratedRequestDispatcher");
-        if (requestDispatchers.Count == 1)
-        {
-            services.AddSingleton(typeof(IRequestDispatcher), requestDispatchers[0]);
-        }
-        else if (requestDispatchers.Count > 1)
-        {
-            services.AddSingleton<IRequestDispatcher>(_ => new CompositeRequestDispatcher(
-                requestDispatchers.Select(t => (IRequestDispatcher)Activator.CreateInstance(t)!)));
-        }
-
-        var streamDispatchers = FindGeneratedTypes<IStreamDispatcher>(assemblies, "GeneratedStreamDispatcher");
-        if (streamDispatchers.Count == 1)
-        {
-            services.AddSingleton(typeof(IStreamDispatcher), streamDispatchers[0]);
-        }
-        else if (streamDispatchers.Count > 1)
-        {
-            services.AddSingleton<IStreamDispatcher>(_ => new CompositeStreamDispatcher(
-                streamDispatchers.Select(t => (IStreamDispatcher)Activator.CreateInstance(t)!)));
-        }
 
         services.AddSingleton(new MediatorOptions
         {
@@ -87,9 +83,9 @@ public static class ServiceCollectionExtensions
         services.AddTransient<ISender>(sp => sp.GetRequiredService<IMediator>());
         services.AddTransient<IPublisher>(sp => sp.GetRequiredService<IMediator>());
 
-        if (assemblies.Length > 0)
+        if (configuration.Assemblies.Count > 0)
         {
-            services.AddRequestHandlers(assemblies);
+            ScanConfiguredAssemblies(services, configuration.Assemblies);
         }
 
         // Registration order is execution order, so add behaviors exactly as configured
@@ -101,26 +97,40 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
-    
     /// <summary>
     /// Scans the specified assemblies and registers all request, stream and notification handlers,
-    /// request validators and request exception handlers as transient services.
+    /// request validators and request exception handlers as transient services, along with the
+    /// assemblies' source-generated routes.
     /// </summary>
+    [RequiresUnreferencedCode(ScanningMessage)]
     public static IServiceCollection AddRequestHandlers(this IServiceCollection services, params Assembly[] assemblies)
     {
-        var handlerTypes = assemblies
-            .SelectMany(a => a.GetTypes())
-            .Where(t => t is { IsClass: true, IsAbstract: false, IsGenericTypeDefinition: false });
+        var types = assemblies.SelectMany(a => a.GetTypes()).ToList();
 
-        foreach (var handlerType in handlerTypes)
+        // The generated routes of each assembly; TryAddEnumerable avoids duplicates when the generated
+        // registration method is also called
+        foreach (var routesType in types.Where(t => t.Name == "GeneratedMediatorRoutes" && typeof(IMediatorRoutes).IsAssignableFrom(t)))
+        {
+            services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IMediatorRoutes), routesType));
+        }
+
+        foreach (var handlerType in types.Where(t => t is { IsClass: true, IsAbstract: false, IsGenericTypeDefinition: false }))
         {
             foreach (var @interface in handlerType.GetInterfaces().Where(IsHandlerInterface))
             {
-                services.AddTransient(@interface, handlerType);
+                // TryAddEnumerable makes registration idempotent, e.g. when also calling the generated registration
+                services.TryAddEnumerable(ServiceDescriptor.Transient(@interface, handlerType));
             }
         }
 
         return services;
+    }
+
+    // Only reached when MediatorConfiguration.RegisterServicesFromAssembly was called, which carries the warning
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Callers of RegisterServicesFromAssembly receive the RequiresUnreferencedCode warning.")]
+    private static void ScanConfiguredAssemblies(IServiceCollection services, IReadOnlyList<Assembly> assemblies)
+    {
+        services.AddRequestHandlers(assemblies.ToArray());
     }
 
     private static bool IsHandlerInterface(Type type)
@@ -136,14 +146,4 @@ public static class ServiceCollectionExtensions
                definition == typeof(IRequestValidator<>) ||
                definition == typeof(IRequestExceptionHandler<,>);
     }
-
-    private static List<Type> FindGeneratedTypes<TInterface>(Assembly[] assemblies, string typeName)
-    {
-        return assemblies
-            .SelectMany(a => a.GetTypes())
-            .Where(t => t.Name == typeName && typeof(TInterface).IsAssignableFrom(t))
-            .ToList();
-    }
 }
-
-

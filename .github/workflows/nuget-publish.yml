@@ -39,7 +39,17 @@ jobs:
     
     - name: Run tests
       run: dotnet test ${{ env.SOLUTION }} --configuration ${{ env.CONFIGURATION }} --no-build --verbosity normal --logger trx --results-directory "TestResults"
-    
+
+    # Proves the generated, reflection-free path works as a real Native AOT executable;
+    # the smoke test exits with a non-zero code if any check fails
+    - name: Install Native AOT prerequisites
+      run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+    - name: Native AOT smoke test
+      run: |
+        dotnet publish PutridParrot.Mediator.AotSmokeTest/PutridParrot.Mediator.AotSmokeTest.csproj --configuration ${{ env.CONFIGURATION }} --output aot-smoke
+        ./aot-smoke/PutridParrot.Mediator.AotSmokeTest
+
     - name: Upload test results
       uses: actions/upload-artifact@v4
       if: always()

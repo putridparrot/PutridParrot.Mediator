@@ -4,6 +4,7 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
+  <Project Path="PutridParrot.Mediator.AotSmokeTest/PutridParrot.Mediator.AotSmokeTest.csproj" />
   <Project Path="PutridParrot.Mediator.Benchmarks/PutridParrot.Mediator.Benchmarks.csproj" />
   <Project Path="PutridParrot.Mediator.Example/PutridParrot.Mediator.Example.csproj" />
   <Project Path="PutridParrot.Mediator.SourceGenerator.Tests/PutridParrot.Mediator.SourceGenerator.Tests.csproj" />

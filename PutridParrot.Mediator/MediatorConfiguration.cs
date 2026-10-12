@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -48,8 +49,9 @@ public sealed class MediatorConfiguration
     public NotificationErrorHandling NotificationErrorHandling { get; set; } = NotificationErrorHandling.ThrowAfterAllHandlers;
 
     /// <summary>
-    /// Scans the assembly for request and stream handlers (and generated dispatchers).
+    /// Scans the assembly for handlers, validators, exception handlers and generated routes.
     /// </summary>
+    [RequiresUnreferencedCode(ServiceCollectionExtensions.ScanningMessage)]
     public MediatorConfiguration RegisterServicesFromAssembly(Assembly assembly)
     {
         ArgumentNullException.ThrowIfNull(assembly);
@@ -62,8 +64,9 @@ public sealed class MediatorConfiguration
     }
 
     /// <summary>
-    /// Scans the assemblies for request and stream handlers (and generated dispatchers).
+    /// Scans the assemblies for handlers, validators, exception handlers and generated routes.
     /// </summary>
+    [RequiresUnreferencedCode(ServiceCollectionExtensions.ScanningMessage)]
     public MediatorConfiguration RegisterServicesFromAssemblies(params Assembly[] assemblies)
     {
         ArgumentNullException.ThrowIfNull(assemblies);
@@ -81,7 +84,8 @@ public sealed class MediatorConfiguration
     /// </summary>
     /// <param name="openBehaviorType">An open generic type implementing <see cref="IPipelineBehavior{TRequest,TResponse}"/>.</param>
     /// <exception cref="ArgumentException">The type is not an open generic pipeline behavior.</exception>
-    public MediatorConfiguration AddOpenBehavior(Type openBehaviorType)
+    public MediatorConfiguration AddOpenBehavior(
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.Interfaces)] Type openBehaviorType)
     {
         ArgumentNullException.ThrowIfNull(openBehaviorType);
 
@@ -103,7 +107,7 @@ public sealed class MediatorConfiguration
     /// </summary>
     /// <typeparam name="TBehavior">A non-generic behavior class.</typeparam>
     /// <exception cref="ArgumentException">The type does not implement a closed pipeline behavior.</exception>
-    public MediatorConfiguration AddBehavior<TBehavior>()
+    public MediatorConfiguration AddBehavior<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.Interfaces)] TBehavior>()
         where TBehavior : class
     {
         var behaviorType = typeof(TBehavior);

@@ -30,6 +30,29 @@ public class MediatorSourceGeneratorTests
                 for (var i = 0; i < request.N; i++) { await Task.Yield(); yield return i; }
             }
         }
+
+        public record Pinged(string Text) : INotification;
+        public class FirstPingedHandler : INotificationHandler<Pinged>
+        {
+            public static List<string> Received { get; } = new();
+            public Task Handle(Pinged notification, CancellationToken cancellationToken = default) { Received.Add("first:" + notification.Text); return Task.CompletedTask; }
+        }
+        public class SecondPingedHandler : INotificationHandler<Pinged>
+        {
+            public Task Handle(Pinged notification, CancellationToken cancellationToken = default) { FirstPingedHandler.Received.Add("second:" + notification.Text); return Task.CompletedTask; }
+        }
+
+        public class PingValidator : IRequestValidator<Ping>
+        {
+            public Task<IReadOnlyList<ValidationFailure>> ValidateAsync(Ping request, CancellationToken cancellationToken) =>
+                Task.FromResult<IReadOnlyList<ValidationFailure>>(request.Text.Length == 0 ? new[] { new ValidationFailure("Text", "required") } : Array.Empty<ValidationFailure>());
+        }
+
+        public class PingExceptionHandler : IRequestExceptionHandler<Ping, string>
+        {
+            public Task<RequestExceptionResult<string>> Handle(Ping request, Exception exception, CancellationToken cancellationToken) =>
+                Task.FromResult(exception is RequestValidationException ? RequestExceptionResult<string>.Handled("invalid") : RequestExceptionResult<string>.NotHandled);
+        }
         """;
 
     [Test]
@@ -41,7 +64,7 @@ public class MediatorSourceGeneratorTests
         Assert.That(result.CompilationProblems, Is.Empty);
         Assert.That(result.GeneratedSources.Keys, Is.EquivalentTo(new[]
         {
-            "MediatorExtensions.g.cs", "GeneratedRequestDispatcher.g.cs", "GeneratedStreamDispatcher.g.cs"
+            "MediatorExtensions.g.cs", "GeneratedMediatorRoutes.g.cs"
         }));
     }
 
@@ -50,7 +73,7 @@ public class MediatorSourceGeneratorTests
     {
         var result = GeneratorTestHelper.Run(BasicHandlers);
 
-        foreach (var name in new[] { "GeneratedMediatorExtensions", "GeneratedRequestDispatcher", "GeneratedStreamDispatcher" })
+        foreach (var name in new[] { "GeneratedMediatorExtensions", "GeneratedMediatorRoutes" })
         {
             var type = result.Type($"PutridParrot.Mediator.{name}");
             Assert.That(type, Is.Not.Null, name);
@@ -88,7 +111,7 @@ public class MediatorSourceGeneratorTests
             """);
 
         Assert.That(result.CompilationProblems, Is.Empty);
-        Assert.That(result.Source("GeneratedRequestDispatcher.g.cs"), Does.Contain("IRequestHandler<global::App.Find, string?>"));
+        Assert.That(result.Source("GeneratedMediatorRoutes.g.cs"), Does.Contain("MediatorRuntime.Send<global::App.Find, string?>"));
     }
 
     [Test]
@@ -103,7 +126,7 @@ public class MediatorSourceGeneratorTests
             """);
 
         Assert.That(result.CompilationProblems, Is.Empty);
-        Assert.That(result.Source("GeneratedRequestDispatcher.g.cs"), Does.Contain("typeof(global::GlobalPing)"));
+        Assert.That(result.Source("GeneratedMediatorRoutes.g.cs"), Does.Contain("typeof(global::GlobalPing)"));
     }
 
     [Test]
@@ -143,11 +166,11 @@ public class MediatorSourceGeneratorTests
 
         Assert.That(result.CompilationProblems, Is.Empty);
 
-        var dispatcher = result.Source("GeneratedRequestDispatcher.g.cs");
-        Assert.That(dispatcher, Does.Contain("typeof(global::App.D)"));
-        Assert.That(dispatcher, Does.Not.Contain("global::App.A"));
-        Assert.That(dispatcher, Does.Not.Contain("global::App.B"));
-        Assert.That(dispatcher, Does.Not.Contain("global::App.C"));
+        var routes = result.Source("GeneratedMediatorRoutes.g.cs");
+        Assert.That(routes, Does.Contain("typeof(global::App.D)"));
+        Assert.That(routes, Does.Not.Contain("global::App.A"));
+        Assert.That(routes, Does.Not.Contain("global::App.B"));
+        Assert.That(routes, Does.Not.Contain("global::App.C"));
     }
 
     [Test]
@@ -196,37 +219,50 @@ public class MediatorSourceGeneratorTests
         Assert.That(diagnostic.Severity, Is.EqualTo(DiagnosticSeverity.Warning));
         Assert.That(diagnostic.GetMessage(), Does.Contain("App.Ping").And.Contain("App.FirstPingHandler").And.Contain("App.SecondPingHandler"));
 
-        // One switch case per request type, otherwise the generated dispatcher wouldn't compile
+        // One switch case per request type, otherwise the generated routes would have duplicate dictionary keys and cases
         Assert.That(result.CompilationProblems, Is.Empty);
     }
 
     [Test]
-    public async Task GeneratedCode_ShouldRegisterHandlersAndDispatchersThatWorkAtRuntime()
+    public async Task GeneratedCode_ShouldRegisterAndRouteEverythingAtRuntime()
     {
         // Everything in the global namespace so Entry can be found by name after loading the assembly
         var result = GeneratorTestHelper.Run((BasicHandlers + """
+
+            public record Unrouted : IRequest<int>;
 
             public static class Entry
             {
                 public static async Task<string> Run()
                 {
                     var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
-                    services.AddMediator();
-                    services.AddGeneratedRequestHandlers();
+                    services.AddMediator(cfg =>
+                    {
+                        cfg.AddOpenBehavior(typeof(ExceptionHandlingBehavior<,>));
+                        cfg.AddOpenBehavior(typeof(ValidationBehavior<,>));
+                    });
+                    services.AddGeneratedMediatorHandlers();
+                    services.AddGeneratedMediatorHandlers(); // calling twice must not duplicate the routes
                     var provider = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(services);
 
-                    var dispatcher = (IRequestDispatcher)provider.GetService(typeof(IRequestDispatcher))!;
-                    var streamDispatcher = (IStreamDispatcher)provider.GetService(typeof(IStreamDispatcher))!;
+                    var routes = ((IEnumerable<IMediatorRoutes>)provider.GetService(typeof(IEnumerable<IMediatorRoutes>))!).ToList();
                     var mediator = (IMediator)provider.GetService(typeof(IMediator))!;
 
+                    // The generated routes know this project's types and return null for others
+                    var context = new MediatorContext(provider, new MediatorOptions(), null);
+                    var knowsPing = routes[0].Send(new Ping("x"), context, default) != null;
+                    var knowsUnrouted = routes[0].Send(new Unrouted(), context, default) != null;
+
                     var pong = await mediator.Send(new Ping("hi"));
+                    var invalid = await mediator.Send(new Ping(""));
                     await mediator.Send(new DoWork());
                     var items = new List<int>();
                     await foreach (var i in mediator.CreateStream(new Count(3))) items.Add(i);
+                    await mediator.Publish(new Pinged("hey"));
 
                     return string.Join("|",
-                        dispatcher.GetType().Name, dispatcher.CanDispatch(typeof(Ping)), dispatcher.CanDispatch(typeof(string)),
-                        streamDispatcher.GetType().Name, pong, string.Join(",", items));
+                        routes.Count, routes[0].GetType().Name, knowsPing, knowsUnrouted,
+                        pong, invalid, string.Join(",", items), string.Join(",", FirstPingedHandler.Received));
                 }
             }
             """).Replace("namespace App;", ""));
@@ -245,7 +281,7 @@ public class MediatorSourceGeneratorTests
             var run = assembly.GetType("Entry")!.GetMethod("Run", BindingFlags.Public | BindingFlags.Static)!;
             var output = await (Task<string>)run.Invoke(null, null)!;
 
-            Assert.That(output, Is.EqualTo("GeneratedRequestDispatcher|True|False|GeneratedStreamDispatcher|pong:hi|0,1,2"));
+            Assert.That(output, Is.EqualTo("1|GeneratedMediatorRoutes|True|False|pong:hi|invalid|0,1,2|first:hey,second:hey"));
         }
         finally
         {

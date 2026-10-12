@@ -34,15 +34,53 @@ public class DispatchAndLifetimeTests
     }
 
     [Test]
-    public async Task Send_WhenDispatcherCannotDispatch_ShouldFallBackToReflection()
+    public async Task Mediator_WhenNoRoutesKnowTheType_ShouldFallBackToRuntimeDelegates()
     {
+        var (mediator, log, _) = CreateMediatorWithRoutes(new EmptyRoutes());
+
+        await AssertAllOperationsWork(mediator, log);
+    }
+
+    [Test]
+    public async Task Mediator_ShouldUseTheFirstRoutesThatKnowTheType()
+    {
+        var recording = new RecordingRoutes();
+        var (mediator, log, _) = CreateMediatorWithRoutes(new EmptyRoutes(), recording);
+
+        await AssertAllOperationsWork(mediator, log);
+
+        Assert.That(recording.Routed, Is.EqualTo(new[] { "request", "command", "stream", "notification" }));
+    }
+
+    [Test]
+    public void Mediator_Constructor_WithNullServiceProvider_ShouldThrow()
+    {
+        Assert.Throws<ArgumentNullException>(() => new Mediator(null!));
+    }
+
+    [Test]
+    public void Mediator_Constructor_WithoutRoutes_ShouldSucceed()
+    {
+        Assert.DoesNotThrow(() => new Mediator(new ServiceCollection().BuildServiceProvider()));
+    }
+
+    private static (IMediator Mediator, NotificationLog Log, IServiceProvider Provider) CreateMediatorWithRoutes(params IMediatorRoutes[] routes)
+    {
+        var log = new NotificationLog();
         var services = new ServiceCollection();
+        services.AddSingleton(log);
         services.AddMediator(typeof(DispatchAndLifetimeTests).Assembly);
-        services.AddSingleton<IRequestDispatcher, NoCaseRequestDispatcher>();
-        services.AddSingleton<IStreamDispatcher, NoCaseStreamDispatcher>();
+        foreach (var route in routes)
+        {
+            services.AddSingleton(route);
+        }
 
-        var mediator = services.BuildServiceProvider().GetRequiredService<IMediator>();
+        var provider = services.BuildServiceProvider();
+        return (provider.GetRequiredService<IMediator>(), log, provider);
+    }
 
+    private static async Task AssertAllOperationsWork(IMediator mediator, NotificationLog log)
+    {
         Assert.That(await mediator.Send(new FallbackRequest(3)), Is.EqualTo(6));
         await mediator.Send(new FallbackCommand());
 
@@ -52,6 +90,9 @@ public class DispatchAndLifetimeTests
             items.Add(item);
         }
         Assert.That(items, Is.EqualTo(new[] { 0, 1, 2 }));
+
+        await mediator.Publish(new RoutedNotification());
+        Assert.That(log.Entries, Is.EqualTo(new[] { "routed notification" }));
     }
 
     [Test]
@@ -74,31 +115,6 @@ public class DispatchAndLifetimeTests
         });
     }
 
-    [Test]
-    public async Task CompositeStreamDispatcher_ShouldUseDispatcherThatKnowsTheRequestType()
-    {
-        var composite = new CompositeStreamDispatcher([new NoCaseStreamDispatcher(), new KnownStreamDispatcher()]);
-
-        Assert.That(composite.CanDispatch(typeof(FallbackStreamRequest)), Is.True);
-
-        var items = new List<int>();
-        await foreach (var item in composite.DispatchStream(new FallbackStreamRequest(2), new FallbackStreamHandler(), CancellationToken.None))
-        {
-            items.Add(item);
-        }
-        Assert.That(items, Is.EqualTo(new[] { 0, 1 }));
-    }
-
-    [Test]
-    public void CompositeStreamDispatcher_WhenNoDispatcherKnowsTheType_ShouldThrow()
-    {
-        var composite = new CompositeStreamDispatcher([new NoCaseStreamDispatcher()]);
-
-        Assert.That(composite.CanDispatch(typeof(FallbackStreamRequest)), Is.False);
-        var ex = Assert.Throws<InvalidOperationException>(() =>
-            composite.DispatchStream(new FallbackStreamRequest(1), new FallbackStreamHandler(), CancellationToken.None));
-        Assert.That(ex!.Message, Does.Contain("No stream dispatcher could handle request type"));
-    }
 }
 
 public class ScopedCounter
@@ -169,30 +185,67 @@ public class ThrowsSynchronouslyStreamHandler : IStreamRequestHandler<ThrowsSync
         throw new ArgumentException("sync failure");
 }
 
-/// <summary>A dispatcher that knows no request types, like a generated dispatcher from another assembly.</summary>
-public class NoCaseRequestDispatcher : IRequestDispatcher
+public record RoutedNotification : INotification;
+
+public class RoutedNotificationHandler(NotificationLog log) : INotificationHandler<RoutedNotification>
 {
-    public bool CanDispatch(Type requestType) => false;
-
-    public Task<TResponse> Dispatch<TResponse>(IRequest<TResponse> request, object handler, CancellationToken cancellationToken) =>
-        throw new InvalidOperationException($"No dispatcher case for request type {request.GetType().FullName}");
-
-    public Task Dispatch(IRequest request, object handler, CancellationToken cancellationToken) =>
-        throw new InvalidOperationException($"No dispatcher case for request type {request.GetType().FullName}");
+    public Task Handle(RoutedNotification notification, CancellationToken cancellationToken = default)
+    {
+        log.Entries.Add("routed notification");
+        return Task.CompletedTask;
+    }
 }
 
-public class NoCaseStreamDispatcher : IStreamDispatcher
+/// <summary>Routes that know no types, like the generated routes of another project.</summary>
+public class EmptyRoutes : IMediatorRoutes
 {
-    public bool CanDispatch(Type requestType) => false;
+    public Task<TResponse>? Send<TResponse>(IRequest<TResponse> request, MediatorContext context, CancellationToken cancellationToken) => null;
 
-    public IAsyncEnumerable<TResponse> DispatchStream<TResponse>(IStreamRequest<TResponse> request, object handler, CancellationToken cancellationToken) =>
-        throw new InvalidOperationException($"No stream dispatcher case for request type {request.GetType().FullName}");
+    public Task? Send(IRequest request, MediatorContext context, CancellationToken cancellationToken) => null;
+
+    public IAsyncEnumerable<TResponse>? CreateStream<TResponse>(IStreamRequest<TResponse> request, MediatorContext context, CancellationToken cancellationToken) => null;
+
+    public Task? Publish(INotification notification, MediatorContext context, CancellationToken cancellationToken) => null;
 }
 
-public class KnownStreamDispatcher : IStreamDispatcher
+/// <summary>Hand-written equivalent of generated routes for the Fallback* types, recording what it routed.</summary>
+public class RecordingRoutes : IMediatorRoutes
 {
-    public bool CanDispatch(Type requestType) => requestType == typeof(FallbackStreamRequest);
+    public List<string> Routed { get; } = [];
 
-    public IAsyncEnumerable<TResponse> DispatchStream<TResponse>(IStreamRequest<TResponse> request, object handler, CancellationToken cancellationToken) =>
-        (IAsyncEnumerable<TResponse>)((FallbackStreamHandler)handler).Handle((FallbackStreamRequest)request, cancellationToken);
+    public Task<TResponse>? Send<TResponse>(IRequest<TResponse> request, MediatorContext context, CancellationToken cancellationToken)
+    {
+        if (request is not FallbackRequest fallback || typeof(TResponse) != typeof(int))
+            return null;
+
+        Routed.Add("request");
+        return (Task<TResponse>)(object)MediatorRuntime.Send<FallbackRequest, int>(context, fallback, cancellationToken);
+    }
+
+    public Task? Send(IRequest request, MediatorContext context, CancellationToken cancellationToken)
+    {
+        if (request is not FallbackCommand command)
+            return null;
+
+        Routed.Add("command");
+        return MediatorRuntime.SendCommand(context, command, cancellationToken);
+    }
+
+    public IAsyncEnumerable<TResponse>? CreateStream<TResponse>(IStreamRequest<TResponse> request, MediatorContext context, CancellationToken cancellationToken)
+    {
+        if (request is not FallbackStreamRequest stream || typeof(TResponse) != typeof(int))
+            return null;
+
+        Routed.Add("stream");
+        return (IAsyncEnumerable<TResponse>)MediatorRuntime.CreateStream<FallbackStreamRequest, int>(context, stream, cancellationToken);
+    }
+
+    public Task? Publish(INotification notification, MediatorContext context, CancellationToken cancellationToken)
+    {
+        if (notification is not RoutedNotification routed)
+            return null;
+
+        Routed.Add("notification");
+        return MediatorRuntime.Publish(context, routed, cancellationToken);
+    }
 }

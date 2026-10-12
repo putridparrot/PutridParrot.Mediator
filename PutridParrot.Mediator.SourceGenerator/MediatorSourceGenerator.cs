@@ -1,5 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 using System.Collections.Generic;
@@ -11,13 +10,18 @@ using System.Threading;
 namespace PutridParrot.Mediator.SourceGenerator;
 
 /// <summary>
-/// Source generator that automatically discovers request handlers and generates extension methods
-/// for registering them with dependency injection at compile time.
+/// Source generator that discovers mediator handlers at compile time and generates reflection-free
+/// registration and routing code for them.
 /// </summary>
 /// <remarks>
-/// This generator scans the compilation for classes implementing IRequestHandler interfaces
-/// and generates a static extension method to register all discovered handlers with the service collection.
-/// This eliminates the need for runtime reflection when registering handlers.
+/// For each project it generates:
+/// <list type="bullet">
+/// <item><c>AddGeneratedMediatorHandlers()</c>, registering every handler, validator and exception handler
+/// with strongly-typed calls.</item>
+/// <item><c>GeneratedMediatorRoutes</c>, routing each request, command, stream and notification type to a
+/// strongly-typed <c>MediatorRuntime</c> call.</item>
+/// </list>
+/// Together they make the mediator usable without reflection, including under trimming and Native AOT.
 /// </remarks>
 [Generator]
 public class MediatorSourceGenerator : IIncrementalGenerator
@@ -34,14 +38,22 @@ public class MediatorSourceGenerator : IIncrementalGenerator
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    // Fully qualified (global::) and keeping nullable annotations, e.g. IRequest<string?>, for generic arguments
+    private static readonly SymbolDisplayFormat TypeNameFormat = SymbolDisplayFormat.FullyQualifiedFormat
+        .AddMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
+
+    // Fully qualified without nullable annotations or tuple element names, as typeof() requires
+    private static readonly SymbolDisplayFormat TypeOfFormat = SymbolDisplayFormat.FullyQualifiedFormat
+        .AddMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.ExpandValueTuple);
+
     /// <summary>
     /// Initializes the incremental generator pipeline.
     /// </summary>
     /// <param name="context">The incremental generator initialization context.</param>
     /// <remarks>
     /// Class declarations with a base list are filtered syntactically, then each is analyzed
-    /// semantically for IRequestHandler / IStreamRequestHandler implementations. The results are
-    /// value-equatable so the IDE only regenerates when the set of handlers actually changes.
+    /// semantically for the mediator interfaces. The results are value-equatable so the IDE only
+    /// regenerates when the set of handlers actually changes.
     /// </remarks>
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
@@ -62,7 +74,7 @@ public class MediatorSourceGenerator : IIncrementalGenerator
         if (context.SemanticModel.GetDeclaredSymbol(context.Node, cancellationToken) is not INamedTypeSymbol classSymbol ||
             classSymbol.IsAbstract ||
             classSymbol.IsGenericType ||
-            !IsAccessibleFromAssembly(classSymbol))
+            !IsAccessible(classSymbol))
         {
             return ImmutableArray<HandlerInfo>.Empty;
         }
@@ -79,67 +91,93 @@ public class MediatorSourceGenerator : IIncrementalGenerator
 
         foreach (var @interface in classSymbol.AllInterfaces)
         {
-            if (!@interface.IsGenericType)
+            if (!@interface.IsGenericType || !@interface.TypeArguments.All(IsAccessible))
                 continue;
 
-            switch (@interface.ConstructedFrom.ToDisplayString())
+            var kind = @interface.ConstructedFrom.ToDisplayString() switch
             {
-                case "PutridParrot.Mediator.IRequestHandler<TRequest, TResponse>":
-                    result.Add(new HandlerInfo(HandlerKind.Request, handlerType,
-                        Name(@interface.TypeArguments[0]), Name(@interface.TypeArguments[1])));
-                    break;
-                case "PutridParrot.Mediator.IRequestHandler<TRequest>":
-                    result.Add(new HandlerInfo(HandlerKind.RequestNoResponse, handlerType,
-                        Name(@interface.TypeArguments[0]), string.Empty));
-                    break;
-                case "PutridParrot.Mediator.IStreamRequestHandler<TRequest, TResponse>":
-                    result.Add(new HandlerInfo(HandlerKind.Stream, handlerType,
-                        Name(@interface.TypeArguments[0]), Name(@interface.TypeArguments[1])));
-                    break;
-            }
+                "PutridParrot.Mediator.IRequestHandler<TRequest, TResponse>" => HandlerKind.Request,
+                "PutridParrot.Mediator.IRequestHandler<TRequest>" => HandlerKind.Command,
+                "PutridParrot.Mediator.IStreamRequestHandler<TRequest, TResponse>" => HandlerKind.Stream,
+                "PutridParrot.Mediator.INotificationHandler<TNotification>" => HandlerKind.Notification,
+                "PutridParrot.Mediator.IRequestValidator<TRequest>" => HandlerKind.Validator,
+                "PutridParrot.Mediator.IRequestExceptionHandler<TRequest, TResponse>" => HandlerKind.ExceptionHandler,
+                _ => (HandlerKind?)null
+            };
+
+            if (kind == null)
+                continue;
+
+            var request = @interface.TypeArguments[0];
+            var response = @interface.TypeArguments.Length > 1 ? @interface.TypeArguments[1] : null;
+
+            result.Add(new HandlerInfo(
+                kind.Value,
+                handlerType,
+                Name(@interface),
+                Name(request),
+                TypeOf(request),
+                response == null ? string.Empty : Name(response),
+                response == null ? string.Empty : TypeOf(response)));
         }
 
         return result.ToImmutable();
     }
 
     /// <summary>
-    /// Generates the registration code and dispatchers for all discovered handlers.
+    /// Generates the registration method and the routes for all discovered handlers.
     /// </summary>
-    /// <remarks>
-    /// Adds "MediatorExtensions.g.cs", "GeneratedRequestDispatcher.g.cs" and "GeneratedStreamDispatcher.g.cs"
-    /// to the compilation as appropriate. Pipeline behaviors need no generated code; the Mediator resolves
-    /// them from dependency injection at runtime.
-    /// </remarks>
     private static void Execute(SourceProductionContext context, ImmutableArray<HandlerInfo> handlers)
     {
-        var requestHandlers = handlers.Where(h => h.Kind != HandlerKind.Stream).ToList();
-        var streamHandlers = handlers.Where(h => h.Kind == HandlerKind.Stream).ToList();
+        if (handlers.IsEmpty)
+            return;
 
-        ReportDuplicateHandlers(context, requestHandlers);
-        ReportDuplicateHandlers(context, streamHandlers);
+        var requests = Routable(context, handlers, HandlerKind.Request);
+        var commands = Routable(context, handlers, HandlerKind.Command);
+        var streams = Routable(context, handlers, HandlerKind.Stream);
 
-        if (requestHandlers.Count > 0 || streamHandlers.Count > 0)
+        // Several handlers per notification are normal; the route only needs each notification type once
+        var notifications = handlers
+            .Where(h => h.Kind == HandlerKind.Notification)
+            .GroupBy(h => h.RequestTypeOf)
+            .Select(g => g.First())
+            .ToList();
+
+        var hasRoutes = requests.Count + commands.Count + streams.Count + notifications.Count > 0;
+
+        context.AddSource("MediatorExtensions.g.cs",
+            SourceText.From(GenerateRegistration(handlers, hasRoutes), Encoding.UTF8));
+
+        if (hasRoutes)
         {
-            var registrationSource = GenerateExtensionClass(requestHandlers, streamHandlers);
-            context.AddSource("MediatorExtensions.g.cs", SourceText.From(registrationSource, Encoding.UTF8));
-        }
-
-        // The dispatchers need one case per request type; duplicates would be unreachable switch cases
-        if (requestHandlers.Count > 0)
-        {
-            var dispatcherSource = GenerateDispatcher(DistinctByRequestType(requestHandlers));
-            context.AddSource("GeneratedRequestDispatcher.g.cs", SourceText.From(dispatcherSource, Encoding.UTF8));
-        }
-
-        if (streamHandlers.Count > 0)
-        {
-            var streamDispatcherSource = GenerateStreamDispatcher(DistinctByRequestType(streamHandlers));
-            context.AddSource("GeneratedStreamDispatcher.g.cs", SourceText.From(streamDispatcherSource, Encoding.UTF8));
+            context.AddSource("GeneratedMediatorRoutes.g.cs",
+                SourceText.From(GenerateRoutes(requests, commands, streams, notifications), Encoding.UTF8));
         }
     }
 
+    /// <summary>
+    /// The handlers of one kind with one entry per request type, reporting duplicates.
+    /// </summary>
+    private static List<HandlerInfo> Routable(SourceProductionContext context, ImmutableArray<HandlerInfo> handlers, HandlerKind kind)
+    {
+        var routable = new List<HandlerInfo>();
 
-    private static string GenerateExtensionClass(List<HandlerInfo> requestHandlers, List<HandlerInfo> streamHandlers)
+        foreach (var group in handlers.Where(h => h.Kind == kind).GroupBy(h => h.RequestTypeOf))
+        {
+            if (group.Count() > 1)
+            {
+                var handlerNames = string.Join(", ", group.Select(h => Display(h.HandlerType)));
+                context.ReportDiagnostic(Diagnostic.Create(DuplicateHandler, Location.None, Display(group.Key), handlerNames));
+            }
+
+            // Matches dependency injection, where the last registration wins
+            routable.Add(group.Last());
+        }
+
+        return routable;
+    }
+
+    private static string GenerateRegistration(ImmutableArray<HandlerInfo> handlers, bool hasRoutes)
     {
         var sb = new StringBuilder();
 
@@ -154,44 +192,21 @@ public class MediatorSourceGenerator : IIncrementalGenerator
         sb.AppendLine("    internal static class GeneratedMediatorExtensions");
         sb.AppendLine("    {");
         sb.AppendLine("        /// <summary>");
-        sb.AppendLine("        /// Registers all discovered request and stream handlers as transient services, along with");
-        sb.AppendLine("        /// the generated dispatchers (unless a dispatcher is already registered).");
+        sb.AppendLine("        /// Registers every request, stream and notification handler, validator and exception handler in this");
+        sb.AppendLine("        /// project as transient services (skipping any already registered), along with the project's generated routes. Uses no reflection, so it");
+        sb.AppendLine("        /// is safe for trimming and Native AOT.");
         sb.AppendLine("        /// </summary>");
-        sb.AppendLine("        public static IServiceCollection AddGeneratedRequestHandlers(this IServiceCollection services)");
+        sb.AppendLine("        public static IServiceCollection AddGeneratedMediatorHandlers(this IServiceCollection services)");
         sb.AppendLine("        {");
 
-        foreach (var handler in requestHandlers)
+        foreach (var handler in handlers)
         {
-            var requestType = handler.RequestType;
-            var handlerType = handler.HandlerType;
-
-            if (handler.HasResponse)
-            {
-                var responseType = handler.ResponseType;
-                sb.AppendLine($"            services.AddTransient<global::PutridParrot.Mediator.IRequestHandler<{requestType}, {responseType}>, {handlerType}>();");
-            }
-            else
-            {
-                sb.AppendLine($"            services.AddTransient<global::PutridParrot.Mediator.IRequestHandler<{requestType}>, {handlerType}>();");
-            }
+            sb.AppendLine($"            services.TryAddEnumerable(ServiceDescriptor.Transient<{handler.ServiceType}, {handler.HandlerType}>());");
         }
 
-        foreach (var handler in streamHandlers)
+        if (hasRoutes)
         {
-            var requestType = handler.RequestType;
-            var responseType = handler.ResponseType;
-            var handlerType = handler.HandlerType;
-            sb.AppendLine($"            services.AddTransient<global::PutridParrot.Mediator.IStreamRequestHandler<{requestType}, {responseType}>, {handlerType}>();");
-        }
-
-        if (requestHandlers.Count > 0)
-        {
-            sb.AppendLine("            services.TryAddSingleton<global::PutridParrot.Mediator.IRequestDispatcher, GeneratedRequestDispatcher>();");
-        }
-
-        if (streamHandlers.Count > 0)
-        {
-            sb.AppendLine("            services.TryAddSingleton<global::PutridParrot.Mediator.IStreamDispatcher, GeneratedStreamDispatcher>();");
+            sb.AppendLine("            services.TryAddEnumerable(ServiceDescriptor.Singleton<global::PutridParrot.Mediator.IMediatorRoutes, GeneratedMediatorRoutes>());");
         }
 
         sb.AppendLine("            return services;");
@@ -202,244 +217,181 @@ public class MediatorSourceGenerator : IIncrementalGenerator
         return sb.ToString();
     }
 
-    /// <summary>
-    /// Generates a request dispatcher that uses direct method calls instead of reflection.
-    /// This provides significantly better performance than reflection-based dispatch.
-    /// </summary>
-    /// <param name="handlers">The list of discovered request handlers.</param>
-    /// <returns>A string containing the complete C# source code for the dispatcher class.</returns>
-    /// <remarks>
-    /// The generated dispatcher uses pattern matching and direct casts to invoke handlers
-    /// without any reflection overhead. This can improve performance by 10-50x compared to reflection.
-    /// </remarks>
-    private static string GenerateDispatcher(List<HandlerInfo> handlers)
+    private static string GenerateRoutes(
+        List<HandlerInfo> requests,
+        List<HandlerInfo> commands,
+        List<HandlerInfo> streams,
+        List<HandlerInfo> notifications)
     {
+        const string Runtime = "global::PutridParrot.Mediator.MediatorRuntime";
         var sb = new StringBuilder();
-            
-        sb.AppendLine("// <auto-generated />");
-        sb.AppendLine("#nullable enable");
-        sb.AppendLine("using System;");
-        sb.AppendLine("using System.Threading;");
-        sb.AppendLine("using System.Threading.Tasks;");
-        sb.AppendLine("using PutridParrot.Mediator;");
-        sb.AppendLine();
-        sb.AppendLine("namespace PutridParrot.Mediator");
-        sb.AppendLine("{");
-        sb.AppendLine("    /// <summary>");
-        sb.AppendLine("    /// Generated request dispatcher that uses direct method calls for optimal performance.");
-        sb.AppendLine("    /// This class is automatically generated at compile time and eliminates reflection overhead.");
-        sb.AppendLine("    /// </summary>");
-        sb.AppendLine("    internal sealed class GeneratedRequestDispatcher : IRequestDispatcher");
-        sb.AppendLine("    {");
-        AppendCanDispatch(sb, handlers);
 
-        // Generate Dispatch<TResponse> method
-        sb.AppendLine("        /// <summary>");
-        sb.AppendLine("        /// Dispatches a request with response using direct, strongly-typed method calls.");
-        sb.AppendLine("        /// </summary>");
-        sb.AppendLine("        public Task<TResponse> Dispatch<TResponse>(");
-        sb.AppendLine("            IRequest<TResponse> request,");
-        sb.AppendLine("            object handler,");
-        sb.AppendLine("            CancellationToken cancellationToken)");
-        sb.AppendLine("        {");
-        
-        var handlersWithResponse = handlers.Where(h => h.HasResponse).ToList();
-        if (handlersWithResponse.Any())
-        {
-            sb.AppendLine("            return request switch");
-            sb.AppendLine("            {");
-            
-            foreach (var handler in handlersWithResponse)
-            {
-                var requestType = handler.RequestType;
-                var responseType = handler.ResponseType;
-                // Cast to the specific handler type, then cast the result to TResponse
-                sb.AppendLine($"                {requestType} r => (Task<TResponse>)(object)((global::PutridParrot.Mediator.IRequestHandler<{requestType}, {responseType}>)handler).Handle(r, cancellationToken),");
-            }
-            
-            sb.AppendLine("                _ => throw new InvalidOperationException($\"No dispatcher case for request type {request.GetType().FullName}\")");
-            sb.AppendLine("            };");
-        }
-        else
-        {
-            sb.AppendLine("            throw new InvalidOperationException($\"No dispatcher case for request type {request.GetType().FullName}\");");
-        }
-        
-        sb.AppendLine("        }");
-        sb.AppendLine();
-        
-        // Generate Dispatch method (no response)
-        sb.AppendLine("        /// <summary>");
-        sb.AppendLine("        /// Dispatches a request without response using direct, strongly-typed method calls.");
-        sb.AppendLine("        /// </summary>");
-        sb.AppendLine("        public Task Dispatch(");
-        sb.AppendLine("            IRequest request,");
-        sb.AppendLine("            object handler,");
-        sb.AppendLine("            CancellationToken cancellationToken)");
-        sb.AppendLine("        {");
-        
-        var handlersWithoutResponse = handlers.Where(h => !h.HasResponse).ToList();
-        if (handlersWithoutResponse.Any())
-        {
-            sb.AppendLine("            return request switch");
-            sb.AppendLine("            {");
-            
-            foreach (var handler in handlersWithoutResponse)
-            {
-                var requestType = handler.RequestType;
-                sb.AppendLine($"                {requestType} r => ((global::PutridParrot.Mediator.IRequestHandler<{requestType}>)handler).Handle(r, cancellationToken),");
-            }
-            
-            sb.AppendLine("                _ => throw new InvalidOperationException($\"No dispatcher case for request type {request.GetType().FullName}\")");
-            sb.AppendLine("            };");
-        }
-        else
-        {
-            sb.AppendLine("            throw new InvalidOperationException($\"No dispatcher case for request type {request.GetType().FullName}\");");
-        }
-        
-        sb.AppendLine("        }");
-        sb.AppendLine("    }");
-        sb.AppendLine("}");
-
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// Generates a stream dispatcher that uses direct method calls instead of reflection.
-    /// This provides significantly better performance than reflection-based dispatch for streaming requests.
-    /// </summary>
-    private static string GenerateStreamDispatcher(List<HandlerInfo> handlers)
-    {
-        var sb = new StringBuilder();
-        
         sb.AppendLine("// <auto-generated />");
         sb.AppendLine("#nullable enable");
         sb.AppendLine("using System;");
         sb.AppendLine("using System.Collections.Generic;");
         sb.AppendLine("using System.Threading;");
-        sb.AppendLine("using PutridParrot.Mediator;");
+        sb.AppendLine("using System.Threading.Tasks;");
         sb.AppendLine();
         sb.AppendLine("namespace PutridParrot.Mediator");
         sb.AppendLine("{");
         sb.AppendLine("    /// <summary>");
-        sb.AppendLine("    /// Generated stream dispatcher that uses direct method calls for optimal performance.");
-        sb.AppendLine("    /// This class is automatically generated at compile time and eliminates reflection overhead.");
+        sb.AppendLine("    /// Reflection-free routes from each request, command, stream and notification type in this project");
+        sb.AppendLine("    /// to a strongly-typed MediatorRuntime call.");
         sb.AppendLine("    /// </summary>");
-        sb.AppendLine("    internal sealed class GeneratedStreamDispatcher : IStreamDispatcher");
+        sb.AppendLine("    internal sealed class GeneratedMediatorRoutes : global::PutridParrot.Mediator.IMediatorRoutes");
         sb.AppendLine("    {");
-        AppendCanDispatch(sb, handlers);
-        sb.AppendLine("        /// <summary>");
-        sb.AppendLine("        /// Dispatches a streaming request using direct, strongly-typed method calls.");
-        sb.AppendLine("        /// </summary>");
-        sb.AppendLine("        public IAsyncEnumerable<TResponse> DispatchStream<TResponse>(");
-        sb.AppendLine("            IStreamRequest<TResponse> request,");
-        sb.AppendLine("            object handler,");
-        sb.AppendLine("            CancellationToken cancellationToken)");
-        sb.AppendLine("        {");
-        
-        if (handlers.Any())
-        {
-            sb.AppendLine("            return request switch");
-            sb.AppendLine("            {");
-            
-            foreach (var handler in handlers)
-            {
-                var requestType = handler.RequestType;
-                var responseType = handler.ResponseType;
-                
-                sb.AppendLine($"                {requestType} r => CastStream<{responseType}, TResponse>(");
-                sb.AppendLine($"                    ((global::PutridParrot.Mediator.IStreamRequestHandler<{requestType}, {responseType}>)handler).Handle(r, cancellationToken)),");
-            }
-            
-            sb.AppendLine("                _ => throw new InvalidOperationException($\"No stream dispatcher case for request type {request.GetType().FullName}\")");
-            sb.AppendLine("            };");
-        }
-        else
-        {
-            sb.AppendLine("            throw new InvalidOperationException($\"No stream dispatcher case for request type {request.GetType().FullName}\");");
-        }
-        
-        sb.AppendLine("        }");
-        sb.AppendLine();
-        sb.AppendLine("        /// <summary>");
-        sb.AppendLine("        /// Helper method to cast the async enumerable stream to the target type.");
-        sb.AppendLine("        /// </summary>");
-        sb.AppendLine("        private static async IAsyncEnumerable<TTarget> CastStream<TSource, TTarget>(");
-        sb.AppendLine("            IAsyncEnumerable<TSource> source)");
-        sb.AppendLine("        {");
-        sb.AppendLine("            await foreach (var item in source)");
-        sb.AppendLine("            {");
-        sb.AppendLine("                yield return (TTarget)(object)item!;");
-        sb.AppendLine("            }");
-        sb.AppendLine("        }");
+
+        AppendIndex(sb, "Requests", requests);
+        AppendIndex(sb, "Commands", commands);
+        AppendIndex(sb, "Streams", streams);
+        AppendIndex(sb, "Notifications", notifications);
+
+        // Requests: the response type check is constant-folded by the JIT
+        AppendMethod(sb,
+            "public Task<TResponse>? Send<TResponse>(global::PutridParrot.Mediator.IRequest<TResponse> request, global::PutridParrot.Mediator.MediatorContext context, CancellationToken cancellationToken)",
+            "Requests", "request", requests,
+            h => $"if (typeof(TResponse) == typeof({h.ResponseTypeOf})) return (Task<TResponse>)(object){Runtime}.Send<{h.RequestType}, {h.ResponseType}>(context, ({h.RequestType})(object)request, cancellationToken);");
+
+        AppendMethod(sb,
+            "public Task? Send(global::PutridParrot.Mediator.IRequest request, global::PutridParrot.Mediator.MediatorContext context, CancellationToken cancellationToken)",
+            "Commands", "request", commands,
+            h => $"return {Runtime}.SendCommand<{h.RequestType}>(context, ({h.RequestType})(object)request, cancellationToken);");
+
+        AppendMethod(sb,
+            "public IAsyncEnumerable<TResponse>? CreateStream<TResponse>(global::PutridParrot.Mediator.IStreamRequest<TResponse> request, global::PutridParrot.Mediator.MediatorContext context, CancellationToken cancellationToken)",
+            "Streams", "request", streams,
+            h => $"if (typeof(TResponse) == typeof({h.ResponseTypeOf})) return (IAsyncEnumerable<TResponse>)(object){Runtime}.CreateStream<{h.RequestType}, {h.ResponseType}>(context, ({h.RequestType})(object)request, cancellationToken);");
+
+        AppendMethod(sb,
+            "public Task? Publish(global::PutridParrot.Mediator.INotification notification, global::PutridParrot.Mediator.MediatorContext context, CancellationToken cancellationToken)",
+            "Notifications", "notification", notifications,
+            h => $"return {Runtime}.Publish<{h.RequestType}>(context, ({h.RequestType})(object)notification, cancellationToken);",
+            last: true);
+
         sb.AppendLine("    }");
         sb.AppendLine("}");
-        
+
         return sb.ToString();
     }
 
-    // Fully qualified (global::) and keeping nullable annotations, e.g. IRequest<string?>
-    private static readonly SymbolDisplayFormat TypeNameFormat = SymbolDisplayFormat.FullyQualifiedFormat
-        .AddMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
-
-    private static string Name(ITypeSymbol type) => type.ToDisplayString(TypeNameFormat);
-
     /// <summary>
-    /// Emits the set of request types the dispatcher knows, so the mediator can fall back to
-    /// reflection for handlers this generator did not see (e.g. in other assemblies).
+    /// Emits a map from each exact runtime type to its case index, so lookup is constant time.
     /// </summary>
-    private static void AppendCanDispatch(StringBuilder sb, List<HandlerInfo> handlers)
+    private static void AppendIndex(StringBuilder sb, string name, List<HandlerInfo> handlers)
     {
-        sb.AppendLine("        private static readonly global::System.Collections.Generic.HashSet<Type> KnownRequestTypes = new()");
+        if (handlers.Count == 0)
+            return;
+
+        sb.AppendLine($"        private static readonly Dictionary<Type, int> {name} = new()");
         sb.AppendLine("        {");
-        foreach (var requestType in handlers.Select(h => h.RequestType).Distinct())
+        for (var i = 0; i < handlers.Count; i++)
         {
-            sb.AppendLine($"            typeof({requestType}),");
+            sb.AppendLine($"            [typeof({handlers[i].RequestTypeOf})] = {i},");
         }
         sb.AppendLine("        };");
         sb.AppendLine();
-        sb.AppendLine("        /// <summary>Returns true for the request types handled by this generated dispatcher.</summary>");
-        sb.AppendLine("        public bool CanDispatch(Type requestType) => KnownRequestTypes.Contains(requestType);");
-        sb.AppendLine();
     }
 
-    private static void ReportDuplicateHandlers(SourceProductionContext context, List<HandlerInfo> handlers)
+    private static void AppendMethod(
+        StringBuilder sb,
+        string signature,
+        string index,
+        string parameter,
+        List<HandlerInfo> handlers,
+        System.Func<HandlerInfo, string> route,
+        bool last = false)
     {
-        foreach (var group in handlers.GroupBy(h => h.RequestType).Where(g => g.Count() > 1))
+        sb.AppendLine($"        /// <summary>Routes known types; returns null for types this project has no handler for.</summary>");
+        sb.AppendLine($"        {signature}");
+        sb.AppendLine("        {");
+
+        if (handlers.Count > 0)
         {
-            var handlerNames = string.Join(", ", group.Select(h => h.HandlerType.Replace("global::", "")));
-            context.ReportDiagnostic(Diagnostic.Create(DuplicateHandler, Location.None,
-                group.Key.Replace("global::", ""), handlerNames));
+            sb.AppendLine($"            if (!{index}.TryGetValue({parameter}.GetType(), out var index)) return null;");
+            sb.AppendLine("            switch (index)");
+            sb.AppendLine("            {");
+            for (var i = 0; i < handlers.Count; i++)
+            {
+                var statement = route(handlers[i]);
+                sb.AppendLine($"                case {i}:");
+                sb.AppendLine($"                    {statement}");
+
+                // Conditional routes fall out of the switch when the response type doesn't match
+                if (!statement.StartsWith("return "))
+                {
+                    sb.AppendLine("                    break;");
+                }
+            }
+            sb.AppendLine("            }");
+        }
+
+        sb.AppendLine("            return null;");
+        sb.AppendLine("        }");
+
+        if (!last)
+        {
+            sb.AppendLine();
         }
     }
 
-    private static List<HandlerInfo> DistinctByRequestType(List<HandlerInfo> handlers) =>
-        handlers.GroupBy(h => h.RequestType).Select(g => g.Last()).ToList();
+    private static string Name(ITypeSymbol type) => type.ToDisplayString(TypeNameFormat);
 
-    private static bool IsAccessibleFromAssembly(INamedTypeSymbol symbol)
+    private static string TypeOf(ITypeSymbol type) => type.ToDisplayString(TypeOfFormat);
+
+    private static string Display(string name) => name.Replace("global::", "");
+
+    /// <summary>
+    /// Whether generated code in this assembly can refer to the type: no private or protected types
+    /// anywhere in it (including generic arguments), and no type parameters.
+    /// </summary>
+    private static bool IsAccessible(ITypeSymbol type)
     {
-        for (var type = symbol; type != null; type = type.ContainingType)
+        switch (type)
         {
-            if (type.DeclaredAccessibility is not (Accessibility.Public or Accessibility.Internal or Accessibility.ProtectedOrInternal))
+            case IArrayTypeSymbol array:
+                return IsAccessible(array.ElementType);
+            case ITypeParameterSymbol:
                 return false;
+            case INamedTypeSymbol named:
+                for (var current = named; current != null; current = current.ContainingType)
+                {
+                    if (current.DeclaredAccessibility is not (Accessibility.Public or Accessibility.Internal or Accessibility.ProtectedOrInternal))
+                        return false;
+                }
+                return named.TypeArguments.All(IsAccessible);
+            default:
+                return true;
         }
-        return true;
     }
 
     private enum HandlerKind
     {
         Request,
-        RequestNoResponse,
-        Stream
+        Command,
+        Stream,
+        Notification,
+        Validator,
+        ExceptionHandler
     }
 
     /// <summary>
     /// Contains metadata about a discovered handler for code generation.
     /// A record so the incremental pipeline can compare results between runs.
     /// </summary>
-    private sealed record HandlerInfo(HandlerKind Kind, string HandlerType, string RequestType, string ResponseType)
-    {
-        public bool HasResponse => Kind != HandlerKind.RequestNoResponse;
-    }
+    /// <param name="Kind">The kind of handler.</param>
+    /// <param name="HandlerType">The handler class, fully qualified.</param>
+    /// <param name="ServiceType">The implemented mediator interface, fully qualified.</param>
+    /// <param name="RequestType">The request or notification type, for use as a generic argument.</param>
+    /// <param name="RequestTypeOf">The request or notification type, for use in typeof().</param>
+    /// <param name="ResponseType">The response type for use as a generic argument, or empty.</param>
+    /// <param name="ResponseTypeOf">The response type for use in typeof(), or empty.</param>
+    private sealed record HandlerInfo(
+        HandlerKind Kind,
+        string HandlerType,
+        string ServiceType,
+        string RequestType,
+        string RequestTypeOf,
+        string ResponseType,
+        string ResponseTypeOf);
 }

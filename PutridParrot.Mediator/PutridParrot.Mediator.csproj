@@ -5,6 +5,8 @@
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <!-- C# 14 (extension blocks) on every target, not just the language version net10.0 defaults to -->
     <LangVersion>14</LangVersion>
+    <!-- Enables the trimming and Native AOT analyzers; reflection-based paths are annotated or guarded -->
+    <IsAotCompatible>true</IsAotCompatible>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 

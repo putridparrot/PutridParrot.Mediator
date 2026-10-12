@@ -16,6 +16,7 @@ internal static class GeneratorTestHelper
         using System.Runtime.CompilerServices;
         using System.Threading;
         using System.Threading.Tasks;
+        using System.Linq;
         using PutridParrot.Mediator;
 
         """;
