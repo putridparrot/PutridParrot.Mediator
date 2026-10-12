@@ -61,6 +61,34 @@ public class PipelineBehaviorTests
     }
 
     [Test]
+    public async Task Send_Command_ShouldRunUnconstrainedBehaviorsAndSkipConstrainedOnes()
+    {
+        var log = new PipelineLog();
+        var mediator = CreateMediator(cfg =>
+        {
+            cfg.AddOpenBehavior(typeof(AnyRequestBehavior<,>));
+            // Constrained to IRequest<TResponse>, so it can't apply to commands and must be skipped
+            cfg.AddOpenBehavior(typeof(CachingBehavior<,>));
+            cfg.AddOpenBehavior(typeof(OuterBehavior<,>));
+        }, log);
+
+        await mediator.Send(new PipelineCommand("go"));
+
+        Assert.That(log.Entries, Is.EqualTo(new[] { "any:PipelineCommand:Unit:before", "command:go", "any:PipelineCommand:Unit:after" }));
+    }
+
+    [Test]
+    public async Task Send_Request_ShouldRunUnconstrainedBehaviorsWithResponseType()
+    {
+        var log = new PipelineLog();
+        var mediator = CreateMediator(cfg => cfg.AddOpenBehavior(typeof(AnyRequestBehavior<,>)), log);
+
+        await mediator.Send(new PipelinePing("x"));
+
+        Assert.That(log.Entries, Is.EqualTo(new[] { "any:PipelinePing:String:before", "handler", "any:PipelinePing:String:after" }));
+    }
+
+    [Test]
     public void AddOpenBehavior_WithClosedType_ShouldThrow()
     {
         var configuration = new MediatorConfiguration();
@@ -86,6 +114,30 @@ public class PipelineLog
 public record PipelinePing(string Message) : IRequest<string>;
 
 public record PipelinePong(int Value) : IRequest<int>;
+
+public record PipelineCommand(string Name) : IRequest;
+
+public class PipelineCommandHandler(PipelineLog log) : IRequestHandler<PipelineCommand>
+{
+    public Task Handle(PipelineCommand request, CancellationToken cancellationToken = default)
+    {
+        log.Entries.Add($"command:{request.Name}");
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>No IRequest constraint, so it applies to commands (with TResponse = Unit) as well as requests.</summary>
+public class AnyRequestBehavior<TRequest, TResponse>(PipelineLog log) : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : notnull
+{
+    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken)
+    {
+        log.Entries.Add($"any:{typeof(TRequest).Name}:{typeof(TResponse).Name}:before");
+        var response = await next();
+        log.Entries.Add($"any:{typeof(TRequest).Name}:{typeof(TResponse).Name}:after");
+        return response;
+    }
+}
 
 public record PipelineCachedQuery(int Id) : IRequest<int>, ICacheableRequest<int>
 {

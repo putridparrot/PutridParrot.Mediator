@@ -4,13 +4,14 @@ A lightweight implementation of the Mediator pattern for .NET, with optional sou
 
 ## Features
 
-- ? Simple and intuitive API
-- ? Support for requests with and without responses
-- ? Built-in dependency injection integration
-- ? Source generator for automatic handler registration
-- ? Pipeline behaviors (logging, caching, or your own) for cross-cutting concerns
-- ? Async/await support with CancellationToken
-- ? Minimal dependencies
+- Simple and intuitive API
+- Requests with and without responses, notifications and streaming requests
+- Built-in dependency injection integration
+- Source generator for reflection-free dispatch and handler registration
+- Pipeline behaviors for cross-cutting concerns, including built-in logging, caching, validation and exception handling
+- Async/await support with CancellationToken
+- Minimal dependencies
+- Targets .NET 8 and .NET 10
 
 ## Installation
 
@@ -107,6 +108,9 @@ public class UserController
 }
 ```
 
+Classes that only send requests can depend on `ISender`, and classes that only publish notifications on
+`IPublisher`. `IMediator` combines both, and all three are registered by `AddMediator`.
+
 ## Pipeline Behaviors
 
 Pipeline behaviors wrap request handling, so you can add cross-cutting concerns such as logging,
@@ -140,9 +144,13 @@ Behaviors registered directly with `services.AddTransient(typeof(IPipelineBehavi
 
 ### Writing a behavior
 
+Behaviors run for requests and for commands (`IRequest` without a response). For commands, `TResponse`
+is `Unit`, a type representing "no value". To apply a behavior only to requests with a response,
+constrain it with `where TRequest : IRequest<TResponse>`; it is then skipped for commands.
+
 ```csharp
 public class TimingBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
-    where TRequest : IRequest<TResponse>
+    where TRequest : notnull
 {
     public async Task<TResponse> Handle(
         TRequest request,
@@ -159,6 +167,10 @@ public class TimingBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, T
 
 ### Built-in behaviors
 
+- **`ExceptionHandlingBehavior<,>`** lets `IRequestExceptionHandler<TRequest, TResponse>` implementations
+  recover from exceptions by returning a response. Add it first so it also sees other behaviors' exceptions.
+- **`ValidationBehavior<,>`** runs every `IRequestValidator<TRequest>` before the handler and throws a
+  `RequestValidationException` listing all failures.
 - **`LoggingPipelineBehavior<,>`** logs each request at Debug level and failures at Error level.
   `services.AddMediatorLogging()` is a shortcut that registers it for all requests.
 - **`CachingBehavior<,>`** caches responses in `IMemoryCache` for requests implementing
@@ -170,6 +182,53 @@ public record GetUserQuery(int Id) : IRequest<UserDto>, ICacheableRequest<UserDt
     public string GetCacheKey() => $"user:{Id}";
     public TimeSpan GetCacheExpiration() => TimeSpan.FromMinutes(5);
 }
+```
+
+### Validation
+
+Implement `IRequestValidator<TRequest>` for any request or command; validators are registered by assembly
+scanning, and all validators for a request run.
+
+```csharp
+public class CreateUserValidator : IRequestValidator<CreateUserCommand>
+{
+    public Task<IReadOnlyList<ValidationFailure>> ValidateAsync(CreateUserCommand request, CancellationToken cancellationToken)
+    {
+        var failures = new List<ValidationFailure>();
+        if (string.IsNullOrWhiteSpace(request.Name))
+            failures.Add(new ValidationFailure(nameof(request.Name), "Name is required"));
+        return Task.FromResult<IReadOnlyList<ValidationFailure>>(failures);
+    }
+}
+
+services.AddMediator(cfg =>
+{
+    cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
+    cfg.AddOpenBehavior(typeof(ValidationBehavior<,>));
+});
+```
+
+### Exception handling
+
+Implement `IRequestExceptionHandler<TRequest, TResponse>` to turn an exception into a response
+(use `Unit` as `TResponse` for commands). Handlers are asked in registration order; returning
+`NotHandled` lets the exception propagate.
+
+```csharp
+public class GetUserNotFoundHandler : IRequestExceptionHandler<GetUserQuery, UserDto?>
+{
+    public Task<RequestExceptionResult<UserDto?>> Handle(GetUserQuery request, Exception exception, CancellationToken cancellationToken) =>
+        Task.FromResult(exception is KeyNotFoundException
+            ? RequestExceptionResult<UserDto?>.Handled(null)
+            : RequestExceptionResult<UserDto?>.NotHandled);
+}
+
+services.AddMediator(cfg =>
+{
+    cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
+    cfg.AddOpenBehavior(typeof(ExceptionHandlingBehavior<,>)); // first, so it sees validation failures too
+    cfg.AddOpenBehavior(typeof(ValidationBehavior<,>));
+});
 ```
 
 ## Notifications
@@ -266,11 +325,14 @@ implementing `IRequestHandler<,>`, `IRequestHandler<>` or `IStreamRequestHandler
 
 `AddMediator(assemblies)` picks up the generated dispatchers automatically, including from several
 assemblies. Any handler the generator can't see (for example in a project without the generator, or a
-private nested class) still works through a reflection fallback.
+private nested class) still works through a fallback that uses delegates built once per request type.
+
+The generator also reports warning `PPMED001` when more than one handler exists for the same request type,
+since dependency injection would silently use only the last one registered.
 
 Benefits:
 - No reflection when invoking handlers
-- Compile-time handler discovery
+- Compile-time handler discovery and duplicate-handler warnings
 - Better performance
 
 ## Best Practices

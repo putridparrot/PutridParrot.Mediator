@@ -1,5 +1,4 @@
 using Microsoft.Extensions.DependencyInjection;
-using System.Reflection;
 
 namespace PutridParrot.Mediator.Tests;
 
@@ -116,12 +115,11 @@ public class IntegrationTests
         var serviceProvider = services.BuildServiceProvider();
         var mediator = serviceProvider.GetRequiredService<IMediator>();
 
-        // Act & Assert - when using reflection path, exception is wrapped
-        var ex = Assert.ThrowsAsync<TargetInvocationException>(async () => 
+        // Act & Assert - the handler's own exception propagates, not a reflection wrapper
+        var ex = Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await mediator.Send(new FailingQuery()));
-        
-        Assert.That(ex!.InnerException, Is.InstanceOf<InvalidOperationException>());
-        Assert.That(ex.InnerException!.Message, Is.EqualTo("This query always fails"));
+
+        Assert.That(ex!.Message, Is.EqualTo("This query always fails"));
     }
 
     [Test]

@@ -55,6 +55,26 @@ public class DispatchAndLifetimeTests
     }
 
     [Test]
+    public void Send_WhenHandlerThrowsSynchronously_ShouldPropagateOriginalException()
+    {
+        var services = new ServiceCollection();
+        services.AddMediator(typeof(DispatchAndLifetimeTests).Assembly);
+        var mediator = services.BuildServiceProvider().GetRequiredService<IMediator>();
+
+        // Non-async handlers throw before returning a Task; this must not surface as TargetInvocationException
+        var ex = Assert.ThrowsAsync<ArgumentException>(() => mediator.Send(new ThrowsSynchronouslyRequest()));
+        Assert.That(ex!.Message, Is.EqualTo("sync failure"));
+
+        Assert.ThrowsAsync<ArgumentException>(() => mediator.Send(new ThrowsSynchronouslyCommand()));
+        Assert.ThrowsAsync<ArgumentException>(async () =>
+        {
+            await foreach (var _ in mediator.CreateStream(new ThrowsSynchronouslyStream()))
+            {
+            }
+        });
+    }
+
+    [Test]
     public async Task CompositeStreamDispatcher_ShouldUseDispatcherThatKnowsTheRequestType()
     {
         var composite = new CompositeStreamDispatcher([new NoCaseStreamDispatcher(), new KnownStreamDispatcher()]);
@@ -123,6 +143,30 @@ public class FallbackStreamHandler : IStreamRequestHandler<FallbackStreamRequest
             yield return i;
         }
     }
+}
+
+public record ThrowsSynchronouslyRequest : IRequest<int>;
+
+public record ThrowsSynchronouslyCommand : IRequest;
+
+public record ThrowsSynchronouslyStream : IStreamRequest<int>;
+
+public class ThrowsSynchronouslyRequestHandler : IRequestHandler<ThrowsSynchronouslyRequest, int>
+{
+    public Task<int> Handle(ThrowsSynchronouslyRequest request, CancellationToken cancellationToken = default) =>
+        throw new ArgumentException("sync failure");
+}
+
+public class ThrowsSynchronouslyCommandHandler : IRequestHandler<ThrowsSynchronouslyCommand>
+{
+    public Task Handle(ThrowsSynchronouslyCommand request, CancellationToken cancellationToken = default) =>
+        throw new ArgumentException("sync failure");
+}
+
+public class ThrowsSynchronouslyStreamHandler : IStreamRequestHandler<ThrowsSynchronouslyStream, int>
+{
+    public IAsyncEnumerable<int> Handle(ThrowsSynchronouslyStream request, CancellationToken cancellationToken = default) =>
+        throw new ArgumentException("sync failure");
 }
 
 /// <summary>A dispatcher that knows no request types, like a generated dispatcher from another assembly.</summary>

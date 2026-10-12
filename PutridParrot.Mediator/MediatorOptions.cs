@@ -9,7 +9,7 @@ namespace PutridParrot.Mediator;
 public sealed class MediatorOptions
 {
     /// <summary>
-    /// How exceptions thrown by notification handlers are handled during <see cref="IMediator.Publish"/>.
+    /// How exceptions thrown by notification handlers are handled during <see cref="IPublisher.Publish"/>.
     /// Default is <see cref="global::PutridParrot.Mediator.NotificationErrorHandling.ThrowAfterAllHandlers"/>.
     /// </summary>
     public NotificationErrorHandling NotificationErrorHandling { get; init; } = NotificationErrorHandling.ThrowAfterAllHandlers;

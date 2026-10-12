@@ -1,25 +1,18 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!-- net8.0 for the current LTS release; net10.0 for the latest -->
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <!-- C# 14 (extension blocks) on every target, not just the language version net10.0 defaults to -->
+    <LangVersion>14</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    
-    <!-- NuGet Package Properties -->
+
+    <!-- NuGet package properties; shared metadata and the version live in Directory.Build.props -->
     <PackageId>PutridParrot.Mediator</PackageId>
-    <Version>1.0.0-alpha</Version>
-    <Authors>PutridParrot</Authors>
-    <Company>PutridParrot</Company>
     <Description>A lightweight mediator pattern implementation for .NET applications with support for request/response and notification patterns. Includes source generator for optimal performance.</Description>
     <PackageTags>mediator;cqrs;messaging;dependency-injection;source-generator</PackageTags>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/putridparrot/PutridParrot.Mediator</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/putridparrot/PutridParrot.Mediator</RepositoryUrl>
-    <RepositoryType>git</RepositoryType>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
-    <IncludeSymbols>true</IncludeSymbols>
-    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
@@ -28,7 +21,6 @@
     <PackageReference Include="Microsoft.Extensions.Caching.Abstractions" />
   </ItemGroup>
 
-  
   <ItemGroup>
     <None Include="..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
@@ -36,18 +28,17 @@
   <!-- Include source generator in the NuGet package -->
   <ItemGroup>
     <!-- Reference the generator project but don't include as normal dependency -->
-    <ProjectReference Include="..\PutridParrot.Mediator.SourceGenerator\PutridParrot.Mediator.SourceGenerator.csproj" 
-                      ReferenceOutputAssembly="false" 
+    <ProjectReference Include="..\PutridParrot.Mediator.SourceGenerator\PutridParrot.Mediator.SourceGenerator.csproj"
+                      ReferenceOutputAssembly="false"
                       PrivateAssets="all" />
   </ItemGroup>
 
   <!-- Pack the source generator DLL into the analyzers folder -->
   <ItemGroup>
-    <None Include="..\PutridParrot.Mediator.SourceGenerator\bin\$(Configuration)\netstandard2.0\PutridParrot.Mediator.SourceGenerator.dll" 
-          Pack="true" 
-          PackagePath="analyzers/dotnet/cs" 
+    <None Include="..\PutridParrot.Mediator.SourceGenerator\bin\$(Configuration)\netstandard2.0\PutridParrot.Mediator.SourceGenerator.dll"
+          Pack="true"
+          PackagePath="analyzers/dotnet/cs"
           Visible="false" />
   </ItemGroup>
 
 </Project>
-

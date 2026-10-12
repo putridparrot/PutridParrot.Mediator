@@ -13,7 +13,7 @@ namespace PutridParrot.Mediator;
 /// It captures request name, handler execution time, and any exceptions that occur.
 /// </remarks>
 public class LoggingPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
-    where TRequest : IRequest<TResponse>
+    where TRequest : notnull
 {
     private readonly ILogger<LoggingPipelineBehavior<TRequest, TResponse>> _logger;
 

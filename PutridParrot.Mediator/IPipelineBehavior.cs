@@ -5,9 +5,13 @@ namespace PutridParrot.Mediator;
 /// Executes before and after handler execution
 /// </summary>
 /// <typeparam name="TRequest">The type of request</typeparam>
-/// <typeparam name="TResponse">The type of response</typeparam>
-public interface IPipelineBehavior<in TRequest, TResponse> 
-    where TRequest : IRequest<TResponse>
+/// <typeparam name="TResponse">The type of response, or <see cref="Unit"/> for commands (<see cref="IRequest"/>)</typeparam>
+/// <remarks>
+/// Behaviors run for both requests and commands. A behavior that should only apply to requests with a
+/// response can constrain <c>TRequest : IRequest&lt;TResponse&gt;</c>; it is then skipped for commands.
+/// </remarks>
+public interface IPipelineBehavior<in TRequest, TResponse>
+    where TRequest : notnull
 {
     /// <summary>
     /// Handle the request and optionally call the next behavior in the pipeline

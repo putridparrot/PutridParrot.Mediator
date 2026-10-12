@@ -12,7 +12,7 @@ public interface IStreamDispatcher
 {
     /// <summary>
     /// Whether this dispatcher has a strongly-typed case for the streaming request type.
-    /// When false, the mediator falls back to reflection to invoke the handler.
+    /// When false, the mediator invokes the handler through its own cached delegates instead.
     /// </summary>
     /// <param name="requestType">The runtime type of the streaming request.</param>
     /// <returns>True by default; generated dispatchers return true only for the request types they know.</returns>

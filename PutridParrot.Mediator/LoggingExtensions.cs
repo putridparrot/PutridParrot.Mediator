@@ -50,7 +50,7 @@ public static class LoggingExtensions
         /// </code>
         /// </example>
         public IServiceCollection AddMediatorLogging<TRequest, TResponse>()
-            where TRequest : IRequest<TResponse>
+            where TRequest : notnull
         {
             services.AddTransient<IPipelineBehavior<TRequest, TResponse>, LoggingPipelineBehavior<TRequest, TResponse>>();
             return services;

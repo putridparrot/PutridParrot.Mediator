@@ -9,7 +9,7 @@ namespace PutridParrot.Mediator;
 public static class ServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers the mediator and optionally scans assemblies for request, stream and notification handlers.
+    /// Registers the mediator and optionally scans assemblies for handlers, validators and exception handlers.
     /// </summary>
     /// <param name="services">The service collection to add services to.</param>
     /// <param name="assemblies">Optional assemblies to scan for handlers. If none provided, only the mediator is registered.</param>
@@ -84,6 +84,8 @@ public static class ServiceCollectionExtensions
         // Transient so the mediator resolves handlers from the current scope (e.g. per HTTP request),
         // allowing handlers to depend on scoped services such as a DbContext
         services.AddTransient<IMediator, Mediator>();
+        services.AddTransient<ISender>(sp => sp.GetRequiredService<IMediator>());
+        services.AddTransient<IPublisher>(sp => sp.GetRequiredService<IMediator>());
 
         if (assemblies.Length > 0)
         {
@@ -101,8 +103,8 @@ public static class ServiceCollectionExtensions
 
     
     /// <summary>
-    /// Scans the specified assemblies and registers all request, stream and notification handlers
-    /// with the service collection as transient services.
+    /// Scans the specified assemblies and registers all request, stream and notification handlers,
+    /// request validators and request exception handlers as transient services.
     /// </summary>
     public static IServiceCollection AddRequestHandlers(this IServiceCollection services, params Assembly[] assemblies)
     {
@@ -130,7 +132,9 @@ public static class ServiceCollectionExtensions
         return definition == typeof(IRequestHandler<,>) ||
                definition == typeof(IRequestHandler<>) ||
                definition == typeof(IStreamRequestHandler<,>) ||
-               definition == typeof(INotificationHandler<>);
+               definition == typeof(INotificationHandler<>) ||
+               definition == typeof(IRequestValidator<>) ||
+               definition == typeof(IRequestExceptionHandler<,>);
     }
 
     private static List<Type> FindGeneratedTypes<TInterface>(Assembly[] assemblies, string typeName)

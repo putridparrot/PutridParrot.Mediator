@@ -5,7 +5,7 @@ namespace PutridParrot.Mediator.Example.Behaviors;
 /// No constructor dependencies required.
 /// </summary>
 public class TimingBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
-    where TRequest : IRequest<TResponse>
+    where TRequest : notnull
 {
     public async Task<TResponse> Handle(
         TRequest request, 

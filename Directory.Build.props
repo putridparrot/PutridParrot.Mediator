@@ -1,8 +1,8 @@
 <Project>
   <PropertyGroup>
-    <!-- Centralized version management -->
+    <!-- Centralized version management. CI overrides this with /p:Version for releases and previews -->
     <VersionPrefix>1.0.0</VersionPrefix>
-    <VersionSuffix Condition="'$(VersionSuffix)' == ''"></VersionSuffix>
+    <VersionSuffix Condition="'$(VersionSuffix)' == ''">alpha</VersionSuffix>
 
     <!-- Common package metadata -->
     <Authors>PutridParrot</Authors>
@@ -13,6 +13,7 @@
     <RepositoryUrl>https://github.com/putridparrot/PutridParrot.Mediator</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>https://github.com/putridparrot/PutridParrot.Mediator/releases</PackageReleaseNotes>
 
     <!-- Build settings -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -21,5 +22,7 @@
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <!-- Deterministic builds with normalized source paths when building in GitHub Actions -->
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
 </Project>

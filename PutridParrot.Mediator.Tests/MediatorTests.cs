@@ -1,5 +1,4 @@
 using Microsoft.Extensions.DependencyInjection;
-using System.Reflection;
 
 namespace PutridParrot.Mediator.Tests;
 
@@ -97,10 +96,9 @@ public class MediatorTests
         var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        // Act & Assert - when using reflection path, exception is wrapped
-        var ex = Assert.ThrowsAsync<TargetInvocationException>(async () => 
+        // Act & Assert - the handler's own exception propagates, not a reflection wrapper
+        Assert.CatchAsync<OperationCanceledException>(async () =>
             await _mediator.Send(request, cts.Token));
-        Assert.That(ex!.InnerException, Is.InstanceOf<OperationCanceledException>());
     }
 
     [Test]

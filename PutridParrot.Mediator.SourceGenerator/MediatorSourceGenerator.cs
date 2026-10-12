@@ -23,6 +23,18 @@ namespace PutridParrot.Mediator.SourceGenerator;
 public class MediatorSourceGenerator : IIncrementalGenerator
 {
     /// <summary>
+    /// Reported when more than one handler handles the same request type; the dependency
+    /// injection container only uses the last one registered.
+    /// </summary>
+    public static readonly DiagnosticDescriptor DuplicateHandler = new(
+        id: "PPMED001",
+        title: "Multiple handlers for the same request type",
+        messageFormat: "Request type '{0}' has more than one handler ({1}); only the last one registered will be used",
+        category: "PutridParrot.Mediator",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
+    /// <summary>
     /// Initializes the incremental generator pipeline.
     /// </summary>
     /// <param name="context">The incremental generator initialization context.</param>
@@ -103,21 +115,25 @@ public class MediatorSourceGenerator : IIncrementalGenerator
         var requestHandlers = handlers.Where(h => h.Kind != HandlerKind.Stream).ToList();
         var streamHandlers = handlers.Where(h => h.Kind == HandlerKind.Stream).ToList();
 
+        ReportDuplicateHandlers(context, requestHandlers);
+        ReportDuplicateHandlers(context, streamHandlers);
+
         if (requestHandlers.Count > 0 || streamHandlers.Count > 0)
         {
             var registrationSource = GenerateExtensionClass(requestHandlers, streamHandlers);
             context.AddSource("MediatorExtensions.g.cs", SourceText.From(registrationSource, Encoding.UTF8));
         }
 
+        // The dispatchers need one case per request type; duplicates would be unreachable switch cases
         if (requestHandlers.Count > 0)
         {
-            var dispatcherSource = GenerateDispatcher(requestHandlers);
+            var dispatcherSource = GenerateDispatcher(DistinctByRequestType(requestHandlers));
             context.AddSource("GeneratedRequestDispatcher.g.cs", SourceText.From(dispatcherSource, Encoding.UTF8));
         }
 
         if (streamHandlers.Count > 0)
         {
-            var streamDispatcherSource = GenerateStreamDispatcher(streamHandlers);
+            var streamDispatcherSource = GenerateStreamDispatcher(DistinctByRequestType(streamHandlers));
             context.AddSource("GeneratedStreamDispatcher.g.cs", SourceText.From(streamDispatcherSource, Encoding.UTF8));
         }
     }
@@ -387,6 +403,19 @@ public class MediatorSourceGenerator : IIncrementalGenerator
         sb.AppendLine("        public bool CanDispatch(Type requestType) => KnownRequestTypes.Contains(requestType);");
         sb.AppendLine();
     }
+
+    private static void ReportDuplicateHandlers(SourceProductionContext context, List<HandlerInfo> handlers)
+    {
+        foreach (var group in handlers.GroupBy(h => h.RequestType).Where(g => g.Count() > 1))
+        {
+            var handlerNames = string.Join(", ", group.Select(h => h.HandlerType.Replace("global::", "")));
+            context.ReportDiagnostic(Diagnostic.Create(DuplicateHandler, Location.None,
+                group.Key.Replace("global::", ""), handlerNames));
+        }
+    }
+
+    private static List<HandlerInfo> DistinctByRequestType(List<HandlerInfo> handlers) =>
+        handlers.GroupBy(h => h.RequestType).Select(g => g.Last()).ToList();
 
     private static bool IsAccessibleFromAssembly(INamedTypeSymbol symbol)
     {
