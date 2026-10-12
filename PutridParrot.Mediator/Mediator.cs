@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace PutridParrot.Mediator;
@@ -17,7 +19,9 @@ public class Mediator : IMediator
     private readonly IServiceProvider _serviceProvider;
     private readonly IRequestDispatcher? _dispatcher;
     private readonly IStreamDispatcher? _streamDispatcher;
-    private readonly object? _behaviorPipeline;
+
+    // Strongly-typed pipeline invokers, built once per (request, response) type pair
+    private static readonly ConcurrentDictionary<(Type Request, Type Response), Delegate> PipelineInvokers = new();
 
     /// <summary>
     /// Initializes a new instance of the FastMediator class.
@@ -30,16 +34,6 @@ public class Mediator : IMediator
         _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
         _dispatcher = dispatcher;
         _streamDispatcher = streamDispatcher;
-        
-        // Try to get generated behavior pipeline
-        var pipelineType = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a => a.GetTypes())
-            .FirstOrDefault(t => t.Name == "GeneratedBehaviorPipeline" && t.Namespace == "PutridParrot.Mediator");
-        
-        if (pipelineType != null)
-        {
-            _behaviorPipeline = Activator.CreateInstance(pipelineType, serviceProvider);
-        }
     }
 
     /// <summary>
@@ -80,24 +74,45 @@ public class Mediator : IMediator
             throw new InvalidOperationException($"Handler for {requestType.FullName} did not return a Task<{typeof(TResponse).FullName}>");
         };
 
-        // Use generated behavior pipeline if available
-        if (_behaviorPipeline != null)
+        // Wrap the handler in any registered pipeline behaviors
+        var invoker = (Func<IServiceProvider, IRequest<TResponse>, Func<Task<TResponse>>, CancellationToken, Task<TResponse>>)
+            PipelineInvokers.GetOrAdd((requestType, typeof(TResponse)), static key =>
+                ExecuteWithBehaviorsMethod
+                    .MakeGenericMethod(key.Request, key.Response)
+                    .CreateDelegate<Func<IServiceProvider, IRequest<TResponse>, Func<Task<TResponse>>, CancellationToken, Task<TResponse>>>());
+
+        return await invoker(_serviceProvider, request, handlerDelegate, cancellationToken);
+    }
+
+    private static readonly MethodInfo ExecuteWithBehaviorsMethod =
+        typeof(Mediator).GetMethod(nameof(ExecuteWithBehaviors), BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    private static Task<TResponse> ExecuteWithBehaviors<TRequest, TResponse>(
+        IServiceProvider serviceProvider,
+        IRequest<TResponse> request,
+        Func<Task<TResponse>> handlerDelegate,
+        CancellationToken cancellationToken)
+        where TRequest : IRequest<TResponse>
+    {
+        var behaviors = serviceProvider.GetServices<IPipelineBehavior<TRequest, TResponse>>().ToArray();
+
+        if (behaviors.Length == 0)
         {
-            var pipelineMethod = _behaviorPipeline.GetType().GetMethod("ExecuteWithBehaviors");
-            if (pipelineMethod != null)
-            {
-                var genericMethod = pipelineMethod.MakeGenericMethod(requestType, typeof(TResponse));
-                var pipelineResult = genericMethod.Invoke(_behaviorPipeline, [request, handlerDelegate, cancellationToken]);
-                
-                if (pipelineResult is Task<TResponse> pipelineTask)
-                {
-                    return await pipelineTask;
-                }
-            }
+            return handlerDelegate();
         }
 
-        // No behaviors, execute handler directly
-        return await handlerDelegate();
+        // Build the pipeline from the inside out so the first registered behavior runs first
+        var typedRequest = (TRequest)request;
+        RequestHandlerDelegate<TResponse> pipeline = () => handlerDelegate();
+
+        for (var i = behaviors.Length - 1; i >= 0; i--)
+        {
+            var behavior = behaviors[i];
+            var next = pipeline;
+            pipeline = () => behavior.Handle(typedRequest, next, cancellationToken);
+        }
+
+        return pipeline();
     }
     
     /// <summary>
@@ -178,7 +193,13 @@ public class Mediator : IMediator
         
         await Task.WhenAll(tasks);
     }
-    
+
+    /// <summary>
+    /// Creates a stream of responses from the handler registered for the streaming request.
+    /// </summary>
+    /// <param name="request">The streaming request.</param>
+    /// <param name="cancellationToken">Cancellation token used while enumerating the stream.</param>
+    /// <exception cref="InvalidOperationException">No stream handler is registered for the request type.</exception>
     public async IAsyncEnumerable<TResponse> CreateStream<TResponse>(
         IStreamRequest<TResponse> request, 
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)

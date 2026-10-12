@@ -10,7 +10,8 @@ on:
   workflow_dispatch:
 
 env:
-  DOTNET_VERSION: '9.0.x'
+  DOTNET_VERSION: '10.0.x'
+  SOLUTION: PutridParrot.Mediator.slnx
   CONFIGURATION: Release
 
 jobs:
@@ -29,13 +30,13 @@ jobs:
         dotnet-version: ${{ env.DOTNET_VERSION }}
     
     - name: Restore dependencies
-      run: dotnet restore
+      run: dotnet restore ${{ env.SOLUTION }}
     
     - name: Build solution
-      run: dotnet build --configuration ${{ env.CONFIGURATION }} --no-restore
+      run: dotnet build ${{ env.SOLUTION }} --configuration ${{ env.CONFIGURATION }} --no-restore
     
     - name: Run tests
-      run: dotnet test --configuration ${{ env.CONFIGURATION }} --no-build --verbosity normal --logger trx --results-directory "TestResults"
+      run: dotnet test ${{ env.SOLUTION }} --configuration ${{ env.CONFIGURATION }} --no-build --verbosity normal --logger trx --results-directory "TestResults"
     
     - name: Upload test results
       uses: actions/upload-artifact@v4
@@ -76,10 +77,10 @@ jobs:
         echo "Building version: $VERSION"
     
     - name: Restore dependencies
-      run: dotnet restore
+      run: dotnet restore ${{ env.SOLUTION }}
     
     - name: Build solution
-      run: dotnet build --configuration ${{ env.CONFIGURATION }} --no-restore /p:Version=${{ steps.version.outputs.VERSION }}
+      run: dotnet build ${{ env.SOLUTION }} --configuration ${{ env.CONFIGURATION }} --no-restore /p:Version=${{ steps.version.outputs.VERSION }}
     
     - name: Pack PutridParrot.Mediator
       run: dotnet pack PutridParrot.Mediator/PutridParrot.Mediator.csproj --configuration ${{ env.CONFIGURATION }} --no-build --output ./artifacts /p:PackageVersion=${{ steps.version.outputs.VERSION }}

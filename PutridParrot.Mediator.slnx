@@ -1,0 +1,12 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PutridParrot.Mediator.Benchmarks/PutridParrot.Mediator.Benchmarks.csproj" />
+  <Project Path="PutridParrot.Mediator.Example/PutridParrot.Mediator.Example.csproj" />
+  <Project Path="PutridParrot.Mediator.SourceGenerator/PutridParrot.Mediator.SourceGenerator.csproj" />
+  <Project Path="PutridParrot.Mediator.Tests/PutridParrot.Mediator.Tests.csproj" />
+  <Project Path="PutridParrot.Mediator/PutridParrot.Mediator.csproj" />
+</Solution>

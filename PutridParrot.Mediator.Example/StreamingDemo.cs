@@ -1,88 +1,99 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using PutridParrot.Mediator;
 
-Console.WriteLine("??????????????????????????????????????????????");
-Console.WriteLine("?  Streaming Requests - Demo Program        ?");
-Console.WriteLine("??????????????????????????????????????????????\n");
+namespace PutridParrot.Mediator.Example.Streaming;
 
-// Setup
-var services = new ServiceCollection();
-
-services.AddLogging(builder =>
+/// <summary>
+/// Demonstrates streaming requests, including cancellation.
+/// </summary>
+public static class StreamingDemo
 {
-    builder.AddConsole();
-    builder.SetMinimumLevel(LogLevel.Information);
-});
-
-services.AddMediator(typeof(Program).Assembly);
-
-var serviceProvider = services.BuildServiceProvider();
-var mediator = serviceProvider.GetRequiredService<IMediator>();
-
-// ========================================
-// Example 1: Stream of Numbers
-// ========================================
-Console.WriteLine("=== Example 1: Stream Numbers (1-10) ===");
-var numberRequest = new StreamNumbersQuery(1, 10);
-
-await foreach (var number in mediator.CreateStream(numberRequest))
-{
-    Console.WriteLine($"  Received: {number}");
-}
-Console.WriteLine();
-
-// ========================================
-// Example 2: Paginated Orders Stream
-// ========================================
-Console.WriteLine("=== Example 2: Stream Orders (Paginated) ===");
-var ordersRequest = new GetOrdersStreamQuery(CustomerId: 123);
-
-await foreach (var order in mediator.CreateStream(ordersRequest))
-{
-    Console.WriteLine($"  Order #{order.OrderId}: ${order.Total:F2} - {order.Status}");
-}
-Console.WriteLine();
-
-// ========================================
-// Example 3: Progress Reporting Stream
-// ========================================
-Console.WriteLine("=== Example 3: Long-Running Task with Progress ===");
-var processRequest = new ProcessDataStreamQuery(ItemCount: 20);
-
-
-await foreach (var progress in mediator.CreateStream(processRequest))
-{
-    Console.Write($"\r  Progress: {progress.Percentage:F1}% [{progress.Processed}/{progress.Total}]");
-}
-Console.WriteLine("\n  ? Processing complete!\n");
-
-// ========================================
-// Example 4: Cancellation Support
-// ========================================
-Console.WriteLine("=== Example 4: Stream with Cancellation (5 seconds) ===");
-using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-
-try
-{
-    var infiniteRequest = new InfiniteNumbersQuery();
-    var count = 0;
-    
-    await foreach (var number in mediator.CreateStream(infiniteRequest, cts.Token))
+    public static async Task RunAsync()
     {
-        Console.WriteLine($"  Number: {number}");
-        count++;
-        
-        if (count >= 10)
-            break; // Stop after 10 items
+        Console.WriteLine("??????????????????????????????????????????????");
+        Console.WriteLine("?  Streaming Requests - Demo Program        ?");
+        Console.WriteLine("??????????????????????????????????????????????\n");
+
+        // Setup
+        var services = new ServiceCollection();
+
+        services.AddLogging(builder =>
+        {
+            builder.AddConsole();
+            builder.SetMinimumLevel(LogLevel.Information);
+        });
+
+        services.AddMediator(typeof(Program).Assembly);
+
+        await using var serviceProvider = services.BuildServiceProvider();
+        var mediator = serviceProvider.GetRequiredService<IMediator>();
+
+        // ========================================
+        // Example 1: Stream of Numbers
+        // ========================================
+        Console.WriteLine("=== Example 1: Stream Numbers (1-10) ===");
+        var numberRequest = new StreamNumbersQuery(1, 10);
+
+        await foreach (var number in mediator.CreateStream(numberRequest))
+        {
+            Console.WriteLine($"  Received: {number}");
+        }
+        Console.WriteLine();
+
+        // ========================================
+        // Example 2: Paginated Orders Stream
+        // ========================================
+        Console.WriteLine("=== Example 2: Stream Orders (Paginated) ===");
+        var ordersRequest = new GetOrdersStreamQuery(CustomerId: 123);
+
+        await foreach (var order in mediator.CreateStream(ordersRequest))
+        {
+            Console.WriteLine($"  Order #{order.OrderId}: ${order.Total:F2} - {order.Status}");
+        }
+        Console.WriteLine();
+
+        // ========================================
+        // Example 3: Progress Reporting Stream
+        // ========================================
+        Console.WriteLine("=== Example 3: Long-Running Task with Progress ===");
+        var processRequest = new ProcessDataStreamQuery(ItemCount: 20);
+
+
+        await foreach (var progress in mediator.CreateStream(processRequest))
+        {
+            Console.Write($"\r  Progress: {progress.Percentage:F1}% [{progress.Processed}/{progress.Total}]");
+        }
+        Console.WriteLine("\n  ? Processing complete!\n");
+
+        // ========================================
+        // Example 4: Cancellation Support
+        // ========================================
+        Console.WriteLine("=== Example 4: Stream with Cancellation (5 seconds) ===");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            var infiniteRequest = new InfiniteNumbersQuery();
+            var count = 0;
+            
+            await foreach (var number in mediator.CreateStream(infiniteRequest, cts.Token))
+            {
+                Console.WriteLine($"  Number: {number}");
+                count++;
+                
+                if (count >= 10)
+                    break; // Stop after 10 items
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("  ??  Stream was cancelled");
+        }
+
+        Console.WriteLine("\n? All streaming examples completed!\n");
     }
 }
-catch (OperationCanceledException)
-{
-    Console.WriteLine("  ??  Stream was cancelled");
-}
-
-Console.WriteLine("\n? All streaming examples completed!\n");
 
 // ========================================
 // STREAM REQUESTS & HANDLERS

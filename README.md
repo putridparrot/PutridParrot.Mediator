@@ -8,6 +8,7 @@ A lightweight implementation of the Mediator pattern for .NET, with optional sou
 - ? Support for requests with and without responses
 - ? Built-in dependency injection integration
 - ? Source generator for automatic handler registration
+- ? Pipeline behaviors (logging, caching, or your own) for cross-cutting concerns
 - ? Async/await support with CancellationToken
 - ? Minimal dependencies
 
@@ -99,6 +100,71 @@ public class UserController
         var command = new CreateUserCommand(name, email);
         await _mediator.Send(command);
     }
+}
+```
+
+## Pipeline Behaviors
+
+Pipeline behaviors wrap request handling, so you can add cross-cutting concerns such as logging,
+caching, validation or timing without changing your handlers. Behaviors are resolved from
+dependency injection when a request is sent and work with or without the source generator.
+
+### Registering behaviors
+
+Declare behaviors when adding the mediator. They run in the order they are added; the first
+behavior added is the outermost, so it runs first before the handler and last after it.
+
+```csharp
+services.AddLogging();
+services.AddMemoryCache();
+
+services.AddMediator(cfg =>
+{
+    cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
+
+    // Open generic behaviors apply to every request
+    cfg.AddOpenBehavior(typeof(LoggingPipelineBehavior<,>));
+    cfg.AddOpenBehavior(typeof(CachingBehavior<,>));
+
+    // Closed behaviors apply only to the request types they implement
+    cfg.AddBehavior<GetUserAuditBehavior>();
+});
+```
+
+Behaviors are transient by default; set `cfg.BehaviorLifetime` before adding behaviors to change this.
+Behaviors registered directly with `services.AddTransient(typeof(IPipelineBehavior<,>), ...)` also work.
+
+### Writing a behavior
+
+```csharp
+public class TimingBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>
+{
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken cancellationToken)
+    {
+        var start = Stopwatch.GetTimestamp();
+        var response = await next();
+        Console.WriteLine($"{typeof(TRequest).Name} took {Stopwatch.GetElapsedTime(start).TotalMilliseconds:F2}ms");
+        return response;
+    }
+}
+```
+
+### Built-in behaviors
+
+- **`LoggingPipelineBehavior<,>`** logs each request at Debug level and failures at Error level.
+  `services.AddMediatorLogging()` is a shortcut that registers it for all requests.
+- **`CachingBehavior<,>`** caches responses in `IMemoryCache` for requests implementing
+  `ICacheableRequest<TResponse>`; other requests pass straight through. Requires `services.AddMemoryCache()`.
+
+```csharp
+public record GetUserQuery(int Id) : IRequest<UserDto>, ICacheableRequest<UserDto>
+{
+    public string GetCacheKey() => $"user:{Id}";
+    public TimeSpan GetCacheExpiration() => TimeSpan.FromMinutes(5);
 }
 ```
 

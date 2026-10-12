@@ -22,6 +22,38 @@ public static class ServiceCollectionExtensions
     /// </remarks>
     public static IServiceCollection AddMediator(this IServiceCollection services, params Assembly[] assemblies)
     {
+        return services.AddMediator(cfg => cfg.RegisterServicesFromAssemblies(assemblies));
+    }
+
+    /// <summary>
+    /// Registers the mediator, scans the configured assemblies for handlers and registers
+    /// the configured pipeline behaviors.
+    /// </summary>
+    /// <param name="services">The service collection to add services to.</param>
+    /// <param name="configure">Configures assemblies to scan and the pipeline behaviors to apply.</param>
+    /// <returns>The service collection for chaining.</returns>
+    /// <remarks>
+    /// Behaviors run in the order they are added to the <see cref="MediatorConfiguration"/>;
+    /// the first behavior added is the outermost.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// services.AddMediator(cfg =>
+    /// {
+    ///     cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
+    ///     cfg.AddOpenBehavior(typeof(LoggingPipelineBehavior&lt;,&gt;));
+    ///     cfg.AddOpenBehavior(typeof(CachingBehavior&lt;,&gt;));
+    /// });
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddMediator(this IServiceCollection services, Action<MediatorConfiguration> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+
+        var configuration = new MediatorConfiguration();
+        configure(configuration);
+        var assemblies = configuration.Assemblies.ToArray();
+
         // Find all generated dispatchers across assemblies
         var dispatcherTypes = assemblies
             .SelectMany(a => a.GetTypes())
@@ -68,11 +100,14 @@ public static class ServiceCollectionExtensions
         if (assemblies.Length > 0)
         {
             services.AddRequestHandlers(assemblies);
-            // Note: Pipeline behaviors are discovered by source generator but must be
-            // manually registered by users due to dependency requirements.
-            // Example: services.AddTransient<IPipelineBehavior<MyRequest, MyResponse>, MyBehavior>();
         }
-        
+
+        // Registration order is execution order, so add behaviors exactly as configured
+        foreach (var behavior in configuration.Behaviors)
+        {
+            services.Add(behavior);
+        }
+
         return services;
     }
 
@@ -84,55 +119,29 @@ public static class ServiceCollectionExtensions
     {
         var handlerTypes = assemblies
             .SelectMany(a => a.GetTypes())
-            .Where(t => t is { IsClass: true, IsAbstract: false } && 
-                       (IsRequestHandler(t) || IsStreamRequestHandler(t) || HasRequestHandlerAttribute(t)));
-        
+            .Where(t => t is { IsClass: true, IsAbstract: false });
+
         foreach (var handlerType in handlerTypes)
         {
-            // Register IRequestHandler<,> and IRequestHandler<>
-            var requestHandlerInterfaces = handlerType.GetInterfaces()
-                .Where(i => i.IsGenericType && 
-                           (i.GetGenericTypeDefinition() == typeof(IRequestHandler<,>) ||
-                            i.GetGenericTypeDefinition() == typeof(IRequestHandler<>)));
-            
-            foreach (var @interface in requestHandlerInterfaces)
-            {
-                services.AddTransient(@interface, handlerType);
-            }
-            
-            // Register IStreamRequestHandler<,>
-            var streamHandlerInterfaces = handlerType.GetInterfaces()
-                .Where(i => i.IsGenericType && 
-                           i.GetGenericTypeDefinition() == typeof(IStreamRequestHandler<,>));
-            
-            foreach (var @interface in streamHandlerInterfaces)
+            // Register each IRequestHandler<,>, IRequestHandler<> and IStreamRequestHandler<,> the type implements
+            foreach (var @interface in handlerType.GetInterfaces().Where(IsHandlerInterface))
             {
                 services.AddTransient(@interface, handlerType);
             }
         }
-        
+
         return services;
     }
 
-    
-    private static bool IsRequestHandler(Type type)
+    private static bool IsHandlerInterface(Type type)
     {
-        return type.GetInterfaces().Any(i => 
-            i.IsGenericType && 
-            (i.GetGenericTypeDefinition() == typeof(IRequestHandler<,>) ||
-             i.GetGenericTypeDefinition() == typeof(IRequestHandler<>)));
-    }
-    
-    private static bool IsStreamRequestHandler(Type type)
-    {
-        return type.GetInterfaces().Any(i => 
-            i.IsGenericType && 
-            i.GetGenericTypeDefinition() == typeof(IStreamRequestHandler<,>));
-    }
-    
-    private static bool HasRequestHandlerAttribute(Type type)
-    {
-        return type.GetCustomAttribute<RequestHandlerAttribute>() != null;
+        if (!type.IsGenericType)
+            return false;
+
+        var definition = type.GetGenericTypeDefinition();
+        return definition == typeof(IRequestHandler<,>) ||
+               definition == typeof(IRequestHandler<>) ||
+               definition == typeof(IStreamRequestHandler<,>);
     }
 }
 

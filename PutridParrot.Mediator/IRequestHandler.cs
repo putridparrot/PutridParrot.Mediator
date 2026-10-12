@@ -43,13 +43,3 @@ public interface IRequestHandler<in TRequest>
     Task Handle(TRequest request, CancellationToken cancellationToken = default);
 }
 
-/// <summary>
-/// Marks a class as a request handler for automatic registration.
-/// Apply this attribute to handler classes that should be automatically discovered and registered
-/// by the mediator service collection extensions.
-/// </summary>
-/// <remarks>
-/// This attribute is optional. Handlers implementing <see cref="IRequestHandler{TRequest}"/> or
-/// <see cref="IRequestHandler{TRequest, TResponse}"/> are automatically discovered without this attribute.
-/// </remarks>
-public class RequestHandlerAttribute : Attribute;
