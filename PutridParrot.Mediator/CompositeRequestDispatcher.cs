@@ -9,23 +9,26 @@ public sealed class CompositeRequestDispatcher(IEnumerable<IRequestDispatcher> d
     private readonly IReadOnlyList<IRequestDispatcher> _dispatchers = dispatchers.ToList();
 
     /// <summary>
-    /// 
+    /// Whether any of the inner dispatchers can dispatch the request type.
     /// </summary>
-    /// <param name="request"></param>
-    /// <param name="handler"></param>
-    /// <param name="cancellationToken"></param>
-    /// <typeparam name="TResponse"></typeparam>
-    /// <returns></returns>
-    /// <exception cref="InvalidOperationException"></exception>
+    public bool CanDispatch(Type requestType) => _dispatchers.Any(d => d.CanDispatch(requestType));
+
+    /// <summary>
+    /// Dispatches the request using the first inner dispatcher that handles its type.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">No inner dispatcher handles the request type.</exception>
     public async Task<TResponse> Dispatch<TResponse>(
-        IRequest<TResponse> request, 
-        object handler, 
+        IRequest<TResponse> request,
+        object handler,
         CancellationToken cancellationToken)
     {
-        var exceptions = new List<Exception>();
+        var requestType = request.GetType();
 
         foreach (var dispatcher in _dispatchers)
         {
+            if (!dispatcher.CanDispatch(requestType))
+                continue;
+
             try
             {
                 return await dispatcher.Dispatch(request, handler, cancellationToken);
@@ -33,31 +36,30 @@ public sealed class CompositeRequestDispatcher(IEnumerable<IRequestDispatcher> d
             catch (InvalidOperationException ex) when (ex.Message.Contains("No dispatcher case"))
             {
                 // This dispatcher doesn't know about this request type, try next
-                exceptions.Add(ex);
             }
         }
-        
+
         throw new InvalidOperationException(
-            $"No dispatcher could handle request type {request.GetType().FullName}. " +
+            $"No dispatcher could handle request type {requestType.FullName}. " +
             $"Tried {_dispatchers.Count} dispatcher(s).");
     }
 
     /// <summary>
-    /// 
+    /// Dispatches the request using the first inner dispatcher that handles its type.
     /// </summary>
-    /// <param name="request"></param>
-    /// <param name="handler"></param>
-    /// <param name="cancellationToken"></param>
-    /// <exception cref="InvalidOperationException"></exception>
+    /// <exception cref="InvalidOperationException">No inner dispatcher handles the request type.</exception>
     public async Task Dispatch(
-        IRequest request, 
-        object handler, 
+        IRequest request,
+        object handler,
         CancellationToken cancellationToken)
     {
-        var exceptions = new List<Exception>();
-        
+        var requestType = request.GetType();
+
         foreach (var dispatcher in _dispatchers)
         {
+            if (!dispatcher.CanDispatch(requestType))
+                continue;
+
             try
             {
                 await dispatcher.Dispatch(request, handler, cancellationToken);
@@ -66,12 +68,11 @@ public sealed class CompositeRequestDispatcher(IEnumerable<IRequestDispatcher> d
             catch (InvalidOperationException ex) when (ex.Message.Contains("No dispatcher case"))
             {
                 // This dispatcher doesn't know about this request type, try next
-                exceptions.Add(ex);
             }
         }
-        
+
         throw new InvalidOperationException(
-            $"No dispatcher could handle request type {request.GetType().FullName}. " +
+            $"No dispatcher could handle request type {requestType.FullName}. " +
             $"Tried {_dispatchers.Count} dispatcher(s).");
     }
 }

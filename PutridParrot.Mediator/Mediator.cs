@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace PutridParrot.Mediator;
 
@@ -19,21 +21,35 @@ public class Mediator : IMediator
     private readonly IServiceProvider _serviceProvider;
     private readonly IRequestDispatcher? _dispatcher;
     private readonly IStreamDispatcher? _streamDispatcher;
+    private readonly MediatorOptions _options;
+    private readonly ILogger<Mediator>? _logger;
 
     // Strongly-typed pipeline invokers, built once per (request, response) type pair
     private static readonly ConcurrentDictionary<(Type Request, Type Response), Delegate> PipelineInvokers = new();
 
+    // Strongly-typed notification publishers, built once per notification type
+    private static readonly ConcurrentDictionary<Type, Func<Mediator, INotification, CancellationToken, Task>> NotificationPublishers = new();
+
     /// <summary>
-    /// Initializes a new instance of the FastMediator class.
+    /// Initializes a new instance of the Mediator class.
     /// </summary>
     /// <param name="serviceProvider">The service provider to resolve handlers.</param>
     /// <param name="dispatcher">Optional generated dispatcher for fast invocation.</param>
     /// <param name="streamDispatcher">Optional generated stream dispatcher for fast streaming.</param>
-    public Mediator(IServiceProvider serviceProvider, IRequestDispatcher? dispatcher = null, IStreamDispatcher? streamDispatcher = null)
+    /// <param name="options">Optional runtime options; defaults are used when not supplied.</param>
+    /// <param name="logger">Optional logger, used for notification handler failures with <see cref="NotificationErrorHandling.LogAndContinue"/>.</param>
+    public Mediator(
+        IServiceProvider serviceProvider,
+        IRequestDispatcher? dispatcher = null,
+        IStreamDispatcher? streamDispatcher = null,
+        MediatorOptions? options = null,
+        ILogger<Mediator>? logger = null)
     {
         _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
         _dispatcher = dispatcher;
         _streamDispatcher = streamDispatcher;
+        _options = options ?? new MediatorOptions();
+        _logger = logger;
     }
 
     /// <summary>
@@ -57,7 +73,7 @@ public class Mediator : IMediator
         Func<Task<TResponse>> handlerDelegate = async () =>
         {
             // Use generated dispatcher if available (fast path)
-            if (_dispatcher != null)
+            if (_dispatcher != null && _dispatcher.CanDispatch(requestType))
             {
                 return await _dispatcher.Dispatch(request, handler, cancellationToken);
             }
@@ -116,11 +132,11 @@ public class Mediator : IMediator
     }
     
     /// <summary>
-    /// 
+    /// Sends a request that has no response to its handler.
     /// </summary>
-    /// <param name="request"></param>
-    /// <param name="cancellationToken"></param>
-    /// <exception cref="InvalidOperationException"></exception>
+    /// <param name="request">The request to send.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="InvalidOperationException">No handler is registered for the request type.</exception>
     public async Task Send(IRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -136,7 +152,7 @@ public class Mediator : IMediator
         }
 
         // Use generated dispatcher if available (fast path)
-        if (_dispatcher != null)
+        if (_dispatcher != null && _dispatcher.CanDispatch(requestType))
         {
             await _dispatcher.Dispatch(request, handler, cancellationToken);
             return;
@@ -157,41 +173,70 @@ public class Mediator : IMediator
     }
     
     /// <summary>
-    /// 
+    /// Publishes a notification to all registered handlers, one at a time in registration order.
+    /// Handler exceptions are handled according to <see cref="MediatorOptions.NotificationErrorHandling"/>.
     /// </summary>
-    /// <param name="notification"></param>
-    /// <param name="cancellationToken"></param>
+    /// <param name="notification">The notification to publish.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     public async Task Publish(INotification notification, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(notification);
         
-        var notificationType = notification.GetType();
-        var handlerType = typeof(INotificationHandler<>).MakeGenericType(notificationType);
-        
-        var handlers = _serviceProvider.GetServices(handlerType);
-        
-        var tasks = handlers.Select(async handler =>
+        var publisher = NotificationPublishers.GetOrAdd(notification.GetType(), static notificationType =>
+            PublishToHandlersMethod
+                .MakeGenericMethod(notificationType)
+                .CreateDelegate<Func<Mediator, INotification, CancellationToken, Task>>());
+
+        await publisher(this, notification, cancellationToken);
+    }
+
+    private static readonly MethodInfo PublishToHandlersMethod =
+        typeof(Mediator).GetMethod(nameof(PublishToHandlers), BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    private static async Task PublishToHandlers<TNotification>(
+        Mediator mediator,
+        INotification notification,
+        CancellationToken cancellationToken)
+        where TNotification : INotification
+    {
+        var typedNotification = (TNotification)notification;
+        var errorHandling = mediator._options.NotificationErrorHandling;
+        List<Exception>? exceptions = null;
+
+        // Handlers run one at a time, in registration order
+        foreach (var handler in mediator._serviceProvider.GetServices<INotificationHandler<TNotification>>())
         {
             try
             {
-                var handleMethod = handlerType.GetMethod(nameof(INotificationHandler<>.Handle));
-                var result = handleMethod!.Invoke(handler, [notification, cancellationToken]);
-                
-                if (result is Task task)
+                await handler.Handle(typedNotification, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (errorHandling != NotificationErrorHandling.StopOnFirstException)
+            {
+                if (errorHandling == NotificationErrorHandling.LogAndContinue)
                 {
-                    await task;
+                    mediator._logger?.LogError(ex, "Notification handler {Handler} failed handling {Notification}",
+                        handler.GetType().FullName, typeof(TNotification).FullName);
+                }
+                else
+                {
+                    (exceptions ??= []).Add(ex);
                 }
             }
-            catch (Exception ex)
-            {
-                // Log but don't stop other handlers
-                // Consider: Add ILogger support or custom error handling strategy
-                System.Diagnostics.Debug.WriteLine($"Error in notification handler: {ex}");
-            }
-        });
-        
-        
-        await Task.WhenAll(tasks);
+        }
+
+        if (exceptions is { Count: 1 })
+        {
+            ExceptionDispatchInfo.Capture(exceptions[0]).Throw();
+        }
+        else if (exceptions is { Count: > 1 })
+        {
+            throw new AggregateException(
+                $"{exceptions.Count} notification handlers failed handling {typeof(TNotification).FullName}", exceptions);
+        }
     }
 
     /// <summary>
@@ -217,7 +262,7 @@ public class Mediator : IMediator
         }
 
         // Use generated stream dispatcher if available (fast path)
-        if (_streamDispatcher != null)
+        if (_streamDispatcher != null && _streamDispatcher.CanDispatch(requestType))
         {
             await foreach (var item in _streamDispatcher.DispatchStream(request, handler, cancellationToken))
             {

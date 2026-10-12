@@ -42,6 +42,12 @@ public sealed class MediatorConfiguration
     public ServiceLifetime BehaviorLifetime { get; set; } = ServiceLifetime.Transient;
 
     /// <summary>
+    /// How exceptions thrown by notification handlers are handled.
+    /// Default is <see cref="global::PutridParrot.Mediator.NotificationErrorHandling.ThrowAfterAllHandlers"/>.
+    /// </summary>
+    public NotificationErrorHandling NotificationErrorHandling { get; set; } = NotificationErrorHandling.ThrowAfterAllHandlers;
+
+    /// <summary>
     /// Scans the assembly for request and stream handlers (and generated dispatchers).
     /// </summary>
     public MediatorConfiguration RegisterServicesFromAssembly(Assembly assembly)

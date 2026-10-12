@@ -85,9 +85,6 @@ jobs:
     - name: Pack PutridParrot.Mediator
       run: dotnet pack PutridParrot.Mediator/PutridParrot.Mediator.csproj --configuration ${{ env.CONFIGURATION }} --no-build --output ./artifacts /p:PackageVersion=${{ steps.version.outputs.VERSION }}
     
-    - name: Pack PutridParrot.Mediator.SourceGenerator
-      run: dotnet pack PutridParrot.Mediator.SourceGenerator/PutridParrot.Mediator.SourceGenerator.csproj --configuration ${{ env.CONFIGURATION }} --no-build --output ./artifacts /p:PackageVersion=${{ steps.version.outputs.VERSION }}
-    
     - name: Upload packages as artifacts
       uses: actions/upload-artifact@v4
       with:

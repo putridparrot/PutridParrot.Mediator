@@ -43,7 +43,7 @@ public class ServiceCollectionExtensionsTests
     }
 
     [Test]
-    public void AddMediator_ShouldRegisterMediatorAsSingleton()
+    public void AddMediator_ShouldRegisterMediatorAsTransient()
     {
         // Arrange
         var services = new ServiceCollection();
@@ -54,8 +54,9 @@ public class ServiceCollectionExtensionsTests
         var mediator1 = serviceProvider.GetService<IMediator>();
         var mediator2 = serviceProvider.GetService<IMediator>();
 
-        // Assert
-        Assert.That(mediator1, Is.SameAs(mediator2));
+        // Assert - transient so each scope resolves handlers from its own provider
+        Assert.That(mediator1, Is.Not.Null);
+        Assert.That(mediator1, Is.Not.SameAs(mediator2));
     }
 
     [Test]

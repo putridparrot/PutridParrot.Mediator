@@ -7,6 +7,14 @@ namespace PutridParrot.Mediator;
 public interface IRequestDispatcher
 {
     /// <summary>
+    /// Whether this dispatcher has a strongly-typed case for the request type.
+    /// When false, the mediator falls back to reflection to invoke the handler.
+    /// </summary>
+    /// <param name="requestType">The runtime type of the request.</param>
+    /// <returns>True by default; generated dispatchers return true only for the request types they know.</returns>
+    bool CanDispatch(Type requestType) => true;
+
+    /// <summary>
     /// Dispatches a request with response to its handler using a direct, strongly-typed call.
     /// </summary>
     /// <typeparam name="TResponse">The response type.</typeparam>
